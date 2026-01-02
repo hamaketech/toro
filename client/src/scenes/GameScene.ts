@@ -1176,15 +1176,20 @@ export class GameScene extends Phaser.Scene {
     this.updateDebug();
   }
 
+  // Store current input for sending to server
+  private currentInputX = 0;
+  private currentInputY = 0;
+  private currentSequence = 0;
+  private lastSendTime = 0;
+  private readonly SEND_RATE = 50; // Send at 20Hz (every 50ms)
+
   private handleLocalMovement(delta: number): void {
     this.updateKeyboardInput();
     
-    let inputX: number;
-    let inputY: number;
-    
+    // Read input
     if (this.keyboardInput.active) {
-      inputX = this.keyboardInput.x;
-      inputY = this.keyboardInput.y;
+      this.currentInputX = this.keyboardInput.x;
+      this.currentInputY = this.keyboardInput.y;
     } else {
       const pointer = this.input.activePointer;
       const camera = this.cameras.main;
@@ -1195,23 +1200,17 @@ export class GameScene extends Phaser.Scene {
       const mouseOffsetX = pointer.x - centerX;
       const mouseOffsetY = pointer.y - centerY;
       
-      inputX = Phaser.Math.Clamp(mouseOffsetX / centerX, -1, 1);
-      inputY = Phaser.Math.Clamp(mouseOffsetY / centerY, -1, 1);
+      this.currentInputX = Phaser.Math.Clamp(mouseOffsetX / centerX, -1, 1);
+      this.currentInputY = Phaser.Math.Clamp(mouseOffsetY / centerY, -1, 1);
     }
     
-    const sequence = this.clientPrediction.getNextSequence();
-    
-    // Check if player has body segments to burn for boost
-    const latestState = this.snapshotInterpolation.getLatestPlayerState(this.playerId || '');
-    const canBoost = (latestState?.targetLength ?? 0) > 0;
-    
+    // Update display position (smoothly follows server)
     const predicted = this.clientPrediction.processInput(
-      inputX,
-      inputY,
+      this.currentInputX,
+      this.currentInputY,
       this.isBoosting,
       delta,
-      sequence,
-      canBoost
+      0 // sequence not used for display
     );
     
     this.lantern.setPosition(predicted.x, predicted.y);
@@ -1257,27 +1256,18 @@ export class GameScene extends Phaser.Scene {
   private sendInputToServer(): void {
     if (!this.socket.connected || !this.isAlive) return;
     
-    let inputX: number;
-    let inputY: number;
+    // Throttle: only send at 20Hz to match server tick rate
+    const now = performance.now();
+    if (now - this.lastSendTime < this.SEND_RATE) return;
+    this.lastSendTime = now;
     
-    if (this.keyboardInput.active) {
-      inputX = this.keyboardInput.x;
-      inputY = this.keyboardInput.y;
-    } else {
-      const pointer = this.input.activePointer;
-      const camera = this.cameras.main;
-      
-      const centerX = camera.width / 2;
-      const centerY = camera.height / 2;
-      
-      inputX = Phaser.Math.Clamp((pointer.x - centerX) / centerX, -1, 1);
-      inputY = Phaser.Math.Clamp((pointer.y - centerY) / centerY, -1, 1);
-    }
+    // Increment sequence only when actually sending
+    this.currentSequence = this.clientPrediction.getNextSequence();
     
     const input: PlayerInput = {
-      sequence: this.clientPrediction.getNextSequence(),
-      mouseX: inputX,
-      mouseY: inputY,
+      sequence: this.currentSequence,
+      mouseX: this.currentInputX,
+      mouseY: this.currentInputY,
       boosting: this.isBoosting,
       timestamp: Date.now(),
     };

@@ -65,7 +65,7 @@ export const GAME_CONFIG = {
     /** Maximum number of snapshots to keep in buffer */
     SNAPSHOT_BUFFER_SIZE: 30,
     /** How many inputs to keep for reconciliation */
-    INPUT_BUFFER_SIZE: 60,
+    INPUT_BUFFER_SIZE: 180,
     /** Maximum position error before snapping instead of interpolating */
     MAX_POSITION_ERROR: 50,
     /** How aggressively to correct position errors (0-1) */
