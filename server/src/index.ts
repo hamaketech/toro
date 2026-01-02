@@ -8,9 +8,15 @@ import type {
   PlayerState, 
   GameSnapshot,
   InitialGameState,
+  Hitodama,
+  BodySegment,
 } from '../../shared/types';
+import { GAME_CONSTANTS } from '../../shared/types';
 
-// Server configuration
+// =============================================================================
+// SERVER CONFIGURATION
+// =============================================================================
+
 const PORT = 3001;
 const TICK_RATE = 20; // 20 updates per second
 
@@ -26,29 +32,49 @@ const PLAYER_CONFIG = {
   BOOST_MULTIPLIER: 1.5,
 };
 
-// Type for our socket with typed events
+// =============================================================================
+// TYPE DEFINITIONS
+// =============================================================================
+
 type GameSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
 
-// Player state stored on server
+/** Position with timestamp for history tracking */
+interface PositionRecord {
+  x: number;
+  y: number;
+  timestamp: number;
+}
+
+/** Player state stored on server (extends shared PlayerState) */
 interface ServerPlayerState extends PlayerState {
   input: PlayerInput;
   currentAngle: number;
   targetAngle: number;
   currentSpeed: number;
+  /** Position history for body segment following */
+  positionHistory: PositionRecord[];
+  /** Accumulated boost drop (fractional segments) */
+  boostDropAccumulator: number;
 }
 
-// Store all connected players
+// =============================================================================
+// GAME STATE
+// =============================================================================
+
 const players: Map<string, ServerPlayerState> = new Map();
-
-// Current game tick
+const food: Map<string, Hitodama> = new Map();
 let currentTick = 0;
+let foodIdCounter = 0;
 
-// Initialize Express + Socket.io
+// =============================================================================
+// EXPRESS + SOCKET.IO SETUP
+// =============================================================================
+
 const app = express();
 const httpServer = createServer(app);
 const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
   cors: {
-    origin: '*', // Allow any origin for local network testing
+    origin: '*',
     methods: ['GET', 'POST'],
   },
 });
@@ -58,25 +84,232 @@ app.get('/', (_req, res) => {
   res.json({ 
     status: 'ok', 
     players: players.size,
+    food: food.size,
     tick: currentTick,
     uptime: process.uptime(),
   });
 });
 
-// Handle new connections
-io.on('connection', (socket: GameSocket) => {
-  const playerId = socket.id;
-  console.log(`Player connected: ${playerId}`);
+// =============================================================================
+// FOOD SYSTEM
+// =============================================================================
+
+function generateFoodId(): string {
+  return `food_${++foodIdCounter}`;
+}
+
+function spawnFood(x?: number, y?: number, value?: number): Hitodama {
+  const id = generateFoodId();
+  const padding = 50;
   
-  // Create initial player state
-  const playerState: ServerPlayerState = {
+  const hitodama: Hitodama = {
+    id,
+    x: x ?? padding + Math.random() * (WORLD_WIDTH - padding * 2),
+    y: y ?? padding + Math.random() * (WORLD_HEIGHT - padding * 2),
+    value: value ?? GAME_CONSTANTS.FOOD_BASE_VALUE,
+    radius: GAME_CONSTANTS.FOOD_RADIUS,
+  };
+  
+  food.set(id, hitodama);
+  return hitodama;
+}
+
+function spawnInitialFood(): void {
+  const initialCount = Math.floor(GAME_CONSTANTS.MAX_FOOD_COUNT * 0.7);
+  for (let i = 0; i < initialCount; i++) {
+    spawnFood();
+  }
+  console.log(`Spawned ${initialCount} initial food items`);
+}
+
+function maintainFoodCount(): void {
+  // Spawn food if below max
+  const currentCount = food.size;
+  if (currentCount < GAME_CONSTANTS.MAX_FOOD_COUNT) {
+    const toSpawn = Math.min(
+      GAME_CONSTANTS.FOOD_SPAWN_RATE,
+      GAME_CONSTANTS.MAX_FOOD_COUNT - currentCount
+    );
+    for (let i = 0; i < toSpawn; i++) {
+      spawnFood();
+    }
+  }
+}
+
+function updateFoodMagnetism(deltaS: number): void {
+  // Apply magnetic pull from players to nearby food
+  for (const player of players.values()) {
+    for (const item of food.values()) {
+      const dx = player.x - item.x;
+      const dy = player.y - item.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      
+      if (distance < GAME_CONSTANTS.FOOD_MAGNET_RADIUS && distance > 0) {
+        // Magnetic pull strength increases as food gets closer
+        const pullFactor = 1 - (distance / GAME_CONSTANTS.FOOD_MAGNET_RADIUS);
+        const pullStrength = GAME_CONSTANTS.FOOD_MAGNET_STRENGTH * pullFactor * pullFactor;
+        
+        // Move food toward player
+        const normalizedDx = dx / distance;
+        const normalizedDy = dy / distance;
+        
+        item.x += normalizedDx * pullStrength * deltaS;
+        item.y += normalizedDy * pullStrength * deltaS;
+      }
+    }
+  }
+}
+
+function checkFoodCollisions(): void {
+  const collectionRadius = PLAYER_CONFIG.RADIUS + GAME_CONSTANTS.FOOD_RADIUS;
+  
+  for (const player of players.values()) {
+    const foodToRemove: string[] = [];
+    
+    for (const item of food.values()) {
+      const dx = player.x - item.x;
+      const dy = player.y - item.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      
+      if (distance < collectionRadius) {
+        // Collect food!
+        player.score += item.value;
+        player.targetLength += item.value * GAME_CONSTANTS.GROWTH_PER_FOOD;
+        foodToRemove.push(item.id);
+        
+        // Notify clients
+        io.emit('foodCollected', item.id, player.id);
+      }
+    }
+    
+    // Remove collected food
+    for (const id of foodToRemove) {
+      food.delete(id);
+    }
+  }
+}
+
+// =============================================================================
+// BODY SEGMENT SYSTEM
+// =============================================================================
+
+function updatePositionHistory(player: ServerPlayerState): void {
+  const now = Date.now();
+  
+  // Add current position to history
+  player.positionHistory.unshift({
+    x: player.x,
+    y: player.y,
+    timestamp: now,
+  });
+  
+  // Calculate how many history points we need
+  const segmentSpacing = GAME_CONSTANTS.BODY_SEGMENT_SPACING;
+  const historyResolution = GAME_CONSTANTS.POSITION_HISTORY_RESOLUTION;
+  const maxSegments = Math.max(player.targetLength, player.bodySegments.length) + 5;
+  const maxHistoryLength = maxSegments * segmentSpacing * historyResolution;
+  
+  // Trim old history
+  while (player.positionHistory.length > maxHistoryLength) {
+    player.positionHistory.pop();
+  }
+}
+
+function calculateBodySegments(player: ServerPlayerState): BodySegment[] {
+  const segments: BodySegment[] = [];
+  const segmentSpacing = GAME_CONSTANTS.BODY_SEGMENT_SPACING;
+  const history = player.positionHistory;
+  
+  if (history.length < 2) {
+    return segments;
+  }
+  
+  // Calculate current body length (may be growing toward targetLength)
+  const currentLength = Math.min(
+    player.bodySegments.length + 1, // Can grow by 1 per tick
+    player.targetLength
+  );
+  
+  // Walk along the position history trail to place segments
+  let distanceAccumulated = 0;
+  let segmentIndex = 0;
+  
+  for (let i = 1; i < history.length && segmentIndex < currentLength; i++) {
+    const prev = history[i - 1];
+    const curr = history[i];
+    
+    const dx = prev.x - curr.x;
+    const dy = prev.y - curr.y;
+    const segmentDistance = Math.sqrt(dx * dx + dy * dy);
+    
+    distanceAccumulated += segmentDistance;
+    
+    // Place a segment every BODY_SEGMENT_SPACING pixels
+    while (distanceAccumulated >= segmentSpacing && segmentIndex < currentLength) {
+      // Interpolate position along this segment
+      const overshoot = distanceAccumulated - segmentSpacing;
+      const t = segmentDistance > 0 ? overshoot / segmentDistance : 0;
+      
+      segments.push({
+        x: curr.x + dx * t,
+        y: curr.y + dy * t,
+      });
+      
+      distanceAccumulated -= segmentSpacing;
+      segmentIndex++;
+    }
+  }
+  
+  return segments;
+}
+
+// =============================================================================
+// BOOST DROP SYSTEM
+// =============================================================================
+
+function handleBoostDrop(player: ServerPlayerState, deltaS: number): void {
+  if (!player.input.boosting || player.targetLength <= GAME_CONSTANTS.MIN_BODY_LENGTH) {
+    return;
+  }
+  
+  // Accumulate drop rate
+  player.boostDropAccumulator += GAME_CONSTANTS.BOOST_DROP_RATE * deltaS;
+  
+  // Drop segments when accumulator reaches 1
+  while (player.boostDropAccumulator >= 1 && player.targetLength > GAME_CONSTANTS.MIN_BODY_LENGTH) {
+    player.boostDropAccumulator -= 1;
+    player.targetLength--;
+    
+    // Drop a pellet at the tail position
+    const tailSegment = player.bodySegments[player.bodySegments.length - 1];
+    if (tailSegment) {
+      spawnFood(
+        tailSegment.x + (Math.random() - 0.5) * 10,
+        tailSegment.y + (Math.random() - 0.5) * 10,
+        GAME_CONSTANTS.DROPPED_PELLET_VALUE
+      );
+    }
+  }
+}
+
+// =============================================================================
+// PLAYER MANAGEMENT
+// =============================================================================
+
+function createPlayer(playerId: string): ServerPlayerState {
+  const startX = WORLD_WIDTH / 2 + (Math.random() - 0.5) * 400;
+  const startY = WORLD_HEIGHT / 2 + (Math.random() - 0.5) * 400;
+  const startAngle = Math.random() * Math.PI * 2;
+  
+  const player: ServerPlayerState = {
     id: playerId,
-    x: WORLD_WIDTH / 2 + (Math.random() - 0.5) * 200,
-    y: WORLD_HEIGHT / 2 + (Math.random() - 0.5) * 200,
-    angle: Math.random() * Math.PI * 2,
+    x: startX,
+    y: startY,
+    angle: startAngle,
     speed: 0,
     score: 0,
     bodySegments: [],
+    targetLength: GAME_CONSTANTS.STARTING_BODY_LENGTH,
     lastProcessedInput: 0,
     input: {
       sequence: 0,
@@ -85,28 +318,46 @@ io.on('connection', (socket: GameSocket) => {
       boosting: false,
       timestamp: Date.now(),
     },
-    currentAngle: 0,
-    targetAngle: 0,
+    currentAngle: startAngle,
+    targetAngle: startAngle,
     currentSpeed: 0,
+    positionHistory: [{ x: startX, y: startY, timestamp: Date.now() }],
+    boostDropAccumulator: 0,
   };
   
-  // Set initial angle
-  playerState.currentAngle = playerState.angle;
-  playerState.targetAngle = playerState.angle;
+  // Initialize position history with enough points for starting body
+  const historyLength = GAME_CONSTANTS.STARTING_BODY_LENGTH * GAME_CONSTANTS.BODY_SEGMENT_SPACING * 2;
+  for (let i = 0; i < historyLength; i++) {
+    player.positionHistory.push({
+      x: startX - Math.cos(startAngle) * i * 0.5,
+      y: startY - Math.sin(startAngle) * i * 0.5,
+      timestamp: Date.now() - i,
+    });
+  }
   
+  return player;
+}
+
+// =============================================================================
+// CONNECTION HANDLING
+// =============================================================================
+
+io.on('connection', (socket: GameSocket) => {
+  const playerId = socket.id;
+  console.log(`Player connected: ${playerId}`);
+  
+  // Create player
+  const playerState = createPlayer(playerId);
   players.set(playerId, playerState);
   
-  // Build initial game state to send to new player
+  // Build initial game state
   const initialState: InitialGameState = {
     playerId,
     snapshot: buildGameSnapshot(),
     serverTime: Date.now(),
   };
   
-  // Send acknowledgment with full initial state
   socket.emit('connected', initialState);
-  
-  // Notify others of new player
   socket.broadcast.emit('playerJoined', playerId);
   
   // Handle player input
@@ -114,7 +365,6 @@ io.on('connection', (socket: GameSocket) => {
     const player = players.get(playerId);
     if (player) {
       player.input = input;
-      // Track the sequence number for reconciliation
       player.lastProcessedInput = input.sequence;
     }
   });
@@ -127,12 +377,28 @@ io.on('connection', (socket: GameSocket) => {
   // Handle disconnection
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${playerId}`);
+    
+    // Drop all body segments as food on death/disconnect
+    const player = players.get(playerId);
+    if (player) {
+      for (const segment of player.bodySegments) {
+        spawnFood(
+          segment.x + (Math.random() - 0.5) * 20,
+          segment.y + (Math.random() - 0.5) * 20,
+          GAME_CONSTANTS.DROPPED_PELLET_VALUE
+        );
+      }
+    }
+    
     players.delete(playerId);
     io.emit('playerLeft', playerId);
   });
 });
 
-// Game loop - updates physics and broadcasts state
+// =============================================================================
+// GAME LOOP
+// =============================================================================
+
 function gameLoop(): void {
   currentTick++;
   const deltaMs = 1000 / TICK_RATE;
@@ -140,15 +406,23 @@ function gameLoop(): void {
   
   // Update all players
   for (const player of players.values()) {
-    updatePlayer(player, deltaS);
+    updatePlayerMovement(player, deltaS);
+    updatePositionHistory(player);
+    player.bodySegments = calculateBodySegments(player);
+    handleBoostDrop(player, deltaS);
   }
   
-  // Build and broadcast game snapshot
+  // Update food
+  updateFoodMagnetism(deltaS);
+  checkFoodCollisions();
+  maintainFoodCount();
+  
+  // Broadcast game state
   const snapshot = buildGameSnapshot();
   io.emit('gameState', snapshot);
 }
 
-function updatePlayer(player: ServerPlayerState, deltaS: number): void {
+function updatePlayerMovement(player: ServerPlayerState, deltaS: number): void {
   const { input } = player;
   
   // Calculate distance from center (for speed control)
@@ -215,18 +489,25 @@ function buildGameSnapshot(): GameSnapshot {
       speed: player.speed,
       score: player.score,
       bodySegments: player.bodySegments,
+      targetLength: player.targetLength,
       lastProcessedInput: player.lastProcessedInput,
     };
   }
   
   return {
     players: playersRecord,
+    food: {
+      items: Array.from(food.values()),
+    },
     serverTime: Date.now(),
     tick: currentTick,
   };
 }
 
-// Utility functions
+// =============================================================================
+// UTILITY FUNCTIONS
+// =============================================================================
+
 function wrapAngle(angle: number): number {
   while (angle > Math.PI) angle -= Math.PI * 2;
   while (angle < -Math.PI) angle += Math.PI * 2;
@@ -237,19 +518,25 @@ function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
+// =============================================================================
+// STARTUP
+// =============================================================================
+
+// Spawn initial food
+spawnInitialFood();
+
 // Start game loop
 setInterval(gameLoop, 1000 / TICK_RATE);
 
-// Start server on all interfaces (0.0.0.0) for local network access
+// Start server
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ╔═══════════════════════════════════════════════╗
 ║     🏮 Tōrō Server - River of Souls 🏮        ║
 ╠═══════════════════════════════════════════════╣
 ║  Server running on http://0.0.0.0:${PORT}        ║
-║  Local network: http://10.1.1.189:${PORT}        ║
 ║  Tick rate: ${TICK_RATE} Hz                           ║
-║  Phase 2: Multiplayer Movement Active         ║
+║  Phase 3: Snake Logic + Food Active           ║
 ╚═══════════════════════════════════════════════╝
   `);
 });

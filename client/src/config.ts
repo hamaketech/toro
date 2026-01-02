@@ -22,6 +22,24 @@ export const GAME_CONFIG = {
     BOOST_MULTIPLIER: 1.5,
   },
   
+  /** Body segment settings */
+  BODY: {
+    SEGMENT_RADIUS: 12,
+    SEGMENT_GLOW_RADIUS: 18,
+    /** Opacity fade from head to tail (1 = full, 0.3 = faded) */
+    TAIL_OPACITY_MIN: 0.4,
+  },
+  
+  /** Food (Hitodama) settings */
+  FOOD: {
+    /** Base glow radius multiplier */
+    GLOW_MULTIPLIER: 1.8,
+    /** Pulse animation speed */
+    PULSE_SPEED: 2,
+    /** Pulse intensity */
+    PULSE_AMOUNT: 0.15,
+  },
+  
   /** Network / Interpolation settings */
   NETWORK: {
     /** Server tick rate (must match server) */
@@ -43,12 +61,20 @@ export const GAME_CONFIG = {
   /** Visual settings */
   COLORS: {
     BACKGROUND: 0x0a0a12,
+    // Local player
     LANTERN_GLOW: 0xffcc66,
     LANTERN_CORE: 0xffeebb,
-    SPIRIT_TRAIL: 0x88ccff,
-    HITODAMA: 0x66ffcc,
+    // Body segments (spirits in procession)
+    SPIRIT_GLOW: 0x88ccff,
+    SPIRIT_CORE: 0xaaddff,
+    // Other players
     OTHER_PLAYER_GLOW: 0xff6666,
     OTHER_PLAYER_CORE: 0xffaaaa,
+    OTHER_SPIRIT_GLOW: 0xff8888,
+    OTHER_SPIRIT_CORE: 0xffbbbb,
+    // Food (Hitodama)
+    HITODAMA_GLOW: 0x66ffcc,
+    HITODAMA_CORE: 0xaaffee,
   },
 } as const;
 

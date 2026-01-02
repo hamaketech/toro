@@ -1,4 +1,4 @@
-import type { GameSnapshot, PlayerState } from '@shared/types';
+import type { GameSnapshot, PlayerState, Hitodama, BodySegment } from '@shared/types';
 import { GAME_CONFIG } from '../config';
 
 /**
@@ -11,13 +11,25 @@ export interface InterpolatedPlayer {
   angle: number;
   speed: number;
   score: number;
-  bodySegments: Array<{ x: number; y: number }>;
+  targetLength: number;
+  bodySegments: BodySegment[];
+}
+
+/**
+ * Interpolated food state
+ */
+export interface InterpolatedFood {
+  id: string;
+  x: number;
+  y: number;
+  value: number;
+  radius: number;
 }
 
 /**
  * SnapshotInterpolation manages a buffer of server snapshots
  * and provides smooth interpolation between them for rendering
- * other players without jitter.
+ * other players and food without jitter.
  */
 export class SnapshotInterpolation {
   private snapshots: GameSnapshot[] = [];
@@ -85,13 +97,10 @@ export class SnapshotInterpolation {
     const { before, after, t } = this.findInterpolationSnapshots(renderTime);
 
     if (!before) {
-      // No snapshots yet, return empty
       return result;
     }
 
     if (!after) {
-      // Only have one snapshot (or render time is past all snapshots)
-      // Use the latest available state
       const snapshot = this.snapshots[this.snapshots.length - 1];
       for (const [id, player] of Object.entries(snapshot.players)) {
         if (id === excludePlayerId) continue;
@@ -106,13 +115,66 @@ export class SnapshotInterpolation {
 
       const playerBefore = before.players[id];
       if (!playerBefore) {
-        // Player just joined, use their current state
         result.set(id, this.playerStateToInterpolated(playerAfter));
         continue;
       }
 
-      // Interpolate position and angle
       result.set(id, this.interpolatePlayer(playerBefore, playerAfter, t));
+    }
+
+    return result;
+  }
+
+  /**
+   * Get interpolated food items
+   * Food moves slowly (magnetic pull), so we interpolate for smoothness
+   */
+  getInterpolatedFood(): Map<string, InterpolatedFood> {
+    const result = new Map<string, InterpolatedFood>();
+    const renderTime = this.getRenderTime();
+
+    const { before, after, t } = this.findInterpolationSnapshots(renderTime);
+
+    if (!before) {
+      return result;
+    }
+
+    // Build maps for quick lookup
+    const beforeFoodMap = new Map<string, Hitodama>();
+    if (before.food?.items) {
+      for (const item of before.food.items) {
+        beforeFoodMap.set(item.id, item);
+      }
+    }
+
+    // Use 'after' snapshot if available, otherwise use latest
+    const targetSnapshot = after || this.snapshots[this.snapshots.length - 1];
+    if (!targetSnapshot.food?.items) {
+      return result;
+    }
+
+    for (const item of targetSnapshot.food.items) {
+      const beforeItem = beforeFoodMap.get(item.id);
+      
+      if (beforeItem && after) {
+        // Interpolate position
+        result.set(item.id, {
+          id: item.id,
+          x: this.lerp(beforeItem.x, item.x, t),
+          y: this.lerp(beforeItem.y, item.y, t),
+          value: item.value,
+          radius: item.radius,
+        });
+      } else {
+        // New food or no interpolation needed
+        result.set(item.id, {
+          id: item.id,
+          x: item.x,
+          y: item.y,
+          value: item.value,
+          radius: item.radius,
+        });
+      }
     }
 
     return result;
@@ -140,7 +202,6 @@ export class SnapshotInterpolation {
       return { before: null, after: null, t: 0 };
     }
 
-    // Find snapshots that bracket the render time
     let before: GameSnapshot | null = null;
     let after: GameSnapshot | null = null;
 
@@ -154,7 +215,6 @@ export class SnapshotInterpolation {
       }
     }
 
-    // Calculate interpolation factor
     if (!before || !after) {
       return { before: before || this.snapshots[0], after: null, t: 0 };
     }
@@ -180,7 +240,8 @@ export class SnapshotInterpolation {
       y: this.lerp(before.y, after.y, t),
       angle: this.lerpAngle(before.angle, after.angle, t),
       speed: this.lerp(before.speed, after.speed, t),
-      score: after.score, // Don't interpolate score
+      score: after.score,
+      targetLength: after.targetLength,
       bodySegments: this.interpolateBodySegments(before.bodySegments, after.bodySegments, t),
     };
   }
@@ -189,11 +250,11 @@ export class SnapshotInterpolation {
    * Interpolate body segments
    */
   private interpolateBodySegments(
-    before: Array<{ x: number; y: number }>,
-    after: Array<{ x: number; y: number }>,
+    before: BodySegment[],
+    after: BodySegment[],
     t: number
-  ): Array<{ x: number; y: number }> {
-    const result: Array<{ x: number; y: number }> = [];
+  ): BodySegment[] {
+    const result: BodySegment[] = [];
     const maxLength = Math.max(before.length, after.length);
 
     for (let i = 0; i < maxLength; i++) {
@@ -224,6 +285,7 @@ export class SnapshotInterpolation {
       angle: state.angle,
       speed: state.speed,
       score: state.score,
+      targetLength: state.targetLength,
       bodySegments: [...state.bodySegments],
     };
   }
@@ -239,11 +301,9 @@ export class SnapshotInterpolation {
    * Angle interpolation (handles wraparound)
    */
   private lerpAngle(a: number, b: number, t: number): number {
-    // Normalize angles to -PI to PI
     let diff = b - a;
     while (diff > Math.PI) diff -= Math.PI * 2;
     while (diff < -Math.PI) diff += Math.PI * 2;
     return a + diff * t;
   }
 }
-
