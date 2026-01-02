@@ -9,23 +9,25 @@ WORKDIR /app
 
 # Copy package files first for better caching
 COPY package*.json ./
-COPY client/tsconfig.json ./client/
-COPY server/tsconfig.json ./server/
-COPY tsconfig.base.json ./
 
 # Install all dependencies (including devDependencies for build)
 RUN npm ci
+
+# Copy TypeScript configs
+COPY tsconfig.base.json ./
+COPY client/tsconfig.json ./client/
+COPY client/vite.config.ts ./client/
 
 # Copy source code
 COPY shared/ ./shared/
 COPY client/ ./client/
 COPY server/ ./server/
 
-# Build client (Vite)
-RUN npm run build:client
+# Build client (Vite) and server (esbuild)
+RUN npm run build
 
-# Build server (TypeScript)
-RUN npm run build:server
+# Verify build outputs exist
+RUN ls -la client/dist/ && ls -la server/dist/
 
 # ==============================================================================
 # Stage 2: Production Runtime
@@ -41,7 +43,6 @@ RUN npm ci --omit=dev
 # Copy built artifacts from builder stage
 COPY --from=builder /app/client/dist ./client/dist
 COPY --from=builder /app/server/dist ./server/dist
-COPY --from=builder /app/shared ./shared
 
 # Copy public assets (SVGs, etc.)
 COPY --from=builder /app/client/public ./client/public
@@ -55,7 +56,7 @@ EXPOSE 3000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/ || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://localhost:${PORT}/api/status || exit 1
 
 # Start the server
 CMD ["node", "server/dist/index.js"]

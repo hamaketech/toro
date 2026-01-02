@@ -7,7 +7,7 @@
     "dev:client": "cd client && vite",
     "dev:server": "cd server && npx tsx watch src/index.ts",
     "build:client": "cd client && vite build",
-    "build:server": "cd server && tsc",
+    "build:server": "esbuild server/src/index.ts --bundle --platform=node --target=node20 --outfile=server/dist/index.js --format=esm --packages=external",
     "build": "npm run build:client && npm run build:server",
     "start": "NODE_ENV=production node server/dist/index.js",
     "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
@@ -26,6 +26,7 @@
     "@types/express": "^4.17.21",
     "@types/node": "^20.11.16",
     "concurrently": "^8.2.2",
+    "esbuild": "^0.20.0",
     "tsx": "^4.7.0",
     "typescript": "^5.3.3",
     "vite": "^5.0.12"
