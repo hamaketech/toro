@@ -76,6 +76,5 @@
 * Scoreboard.
 
 **Phase 5: Juice & Polish**
-* Add the "Fog of War" masking.
+* Name selection screen before joining
 * Add Glow/Bloom shaders.
-* Add Class selection screen.

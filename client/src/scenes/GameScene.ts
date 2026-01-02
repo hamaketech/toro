@@ -11,9 +11,15 @@ import type {
   InitialGameState,
   BodySegment,
   DeathEvent,
+  JoinOptions,
 } from '@shared/types';
 
 type GameSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
+
+/** Data passed from MainMenuScene */
+interface SceneData {
+  playerName: string;
+}
 
 // =============================================================================
 // TYPE DEFINITIONS
@@ -30,6 +36,7 @@ interface RemotePlayerVisual {
   container: Phaser.GameObjects.Container;
   glow: Phaser.GameObjects.Arc;
   core: Phaser.GameObjects.Arc;
+  nameText: Phaser.GameObjects.Text;
   bodySegments: BodySegmentVisual[];
 }
 
@@ -60,6 +67,7 @@ interface DeathParticle {
 export class GameScene extends Phaser.Scene {
   private socket!: GameSocket;
   private playerId: string | null = null;
+  private playerName = 'Wandering Soul';
   
   // Network systems
   private snapshotInterpolation!: SnapshotInterpolation;
@@ -114,6 +122,10 @@ export class GameScene extends Phaser.Scene {
     super({ key: 'GameScene' });
   }
 
+  init(data: SceneData): void {
+    this.playerName = data?.playerName || 'Wandering Soul';
+  }
+
   create(): void {
     this.snapshotInterpolation = new SnapshotInterpolation();
     
@@ -124,6 +136,25 @@ export class GameScene extends Phaser.Scene {
     this.createDeathParticleSystem();
     this.connectToServer();
     this.setupDebug();
+    this.setupBloom();
+  }
+  
+  /**
+   * Setup bloom post-processing effect
+   */
+  private setupBloom(): void {
+    // Apply bloom to the main camera
+    if (this.game.renderer instanceof Phaser.Renderer.WebGL.WebGLRenderer) {
+      try {
+        const BloomPipeline = this.game.renderer.pipelines.getPostPipeline('BloomPipeline');
+        if (BloomPipeline) {
+          this.cameras.main.setPostPipeline('BloomPipeline');
+          console.log('Bloom effect applied to camera');
+        }
+      } catch (e) {
+        console.warn('Could not apply bloom pipeline:', e);
+      }
+    }
   }
 
   // ===========================================================================
@@ -252,6 +283,16 @@ export class GameScene extends Phaser.Scene {
         this.requestRespawn();
       }
     });
+    
+    // ESC to return to main menu
+    this.input.keyboard?.on('keydown-ESC', () => {
+      this.returnToMenu();
+    });
+  }
+  
+  private returnToMenu(): void {
+    this.shutdown();
+    this.scene.start('MainMenuScene');
   }
   
   private updateKeyboardInput(): void {
@@ -359,10 +400,10 @@ export class GameScene extends Phaser.Scene {
       if (data) {
         const rank = i + 1;
         const isMe = data.id === this.playerId;
-        const displayId = data.id.substring(0, 6);
+        const displayName = data.name.substring(0, 12);
         const medal = rank === 1 ? '👑' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '  ';
         
-        entry.setText(`${medal} ${rank}. ${displayId} - ${data.score} pts`);
+        entry.setText(`${medal} ${rank}. ${displayName} - ${data.score}`);
         entry.setColor(isMe ? '#ffcc66' : '#aaddff');
         entry.setAlpha(1);
       } else {
@@ -529,12 +570,12 @@ export class GameScene extends Phaser.Scene {
   private getCauseText(event: DeathEvent): string {
     switch (event.cause) {
       case 'head_collision':
-        return event.killerId 
-          ? `Crashed into ${event.killerId.substring(0, 6)}'s procession`
+        return event.killerName 
+          ? `Crashed into ${event.killerName}'s procession`
           : 'Crashed into another player';
       case 'head_to_head':
-        return event.killerId 
-          ? `Head-on collision with ${event.killerId.substring(0, 6)}`
+        return event.killerName 
+          ? `Head-on collision with ${event.killerName}`
           : 'Head-on collision';
       case 'world_border':
         return 'Touched the void beyond the world';
@@ -582,6 +623,12 @@ export class GameScene extends Phaser.Scene {
       console.log('Connected to server with ID:', state.playerId);
       this.playerId = state.playerId;
       
+      // Join game with player name
+      const joinOptions: JoinOptions = {
+        name: this.playerName,
+      };
+      this.socket.emit('joinGame', joinOptions);
+      
       const myState = state.snapshot.players[state.playerId];
       if (myState) {
         this.clientPrediction.setPosition(myState.x, myState.y, myState.angle);
@@ -602,8 +649,8 @@ export class GameScene extends Phaser.Scene {
       this.snapshotInterpolation.updateTimeSync(serverTime, clientTime);
     });
     
-    this.socket.on('playerJoined', (playerId: string) => {
-      console.log('Player joined:', playerId);
+    this.socket.on('playerJoined', (playerId: string, playerName: string) => {
+      console.log(`Player joined: ${playerName} (${playerId})`);
     });
     
     this.socket.on('playerLeft', (playerId: string) => {
@@ -880,13 +927,24 @@ export class GameScene extends Phaser.Scene {
         GAME_CONFIG.COLORS.OTHER_PLAYER_CORE, 1
       );
       
-      container.add([glow, core]);
+      // Player name tag above their lantern
+      const nameText = this.add.text(0, -35, state.name, {
+        fontSize: '12px',
+        fontFamily: 'Georgia, serif',
+        color: '#ffffff',
+        backgroundColor: '#00000088',
+        padding: { x: 4, y: 2 },
+      });
+      nameText.setOrigin(0.5);
       
-      visual = { container, glow, core, bodySegments: [] };
+      container.add([glow, core, nameText]);
+      
+      visual = { container, glow, core, nameText, bodySegments: [] };
       this.otherPlayers.set(id, visual);
     }
     
     visual.container.setPosition(state.x, state.y);
+    visual.nameText.setText(state.name);
     this.updateOtherPlayerBodySegments(visual, state.bodySegments);
   }
 
@@ -1187,18 +1245,17 @@ export class GameScene extends Phaser.Scene {
     const inputMode = this.keyboardInput.active ? 'Keyboard' : 'Mouse';
     
     this.debugText.setText([
-      `Phase 4: Combat & Collision`,
+      `Phase 5: Juice & Polish`,
+      `Player: ${this.playerName}`,
       `RTT: ${rtt}ms`,
       `Position: (${pos.x.toFixed(0)}, ${pos.y.toFixed(0)})`,
       `Input: ${inputMode}`,
       `Alive: ${this.isAlive}`,
       `Body Segments: ${this.localBodySegments.length}`,
-      `Target Length: ${latestState?.targetLength ?? 0}`,
       `Score: ${latestState?.score ?? 0}`,
       `Kills: ${latestState?.kills ?? 0}`,
-      `Food Items: ${this.foodVisuals.size}`,
       `Other Players: ${this.otherPlayers.size}`,
-      `[F3 to toggle debug]`,
+      `[F3 debug] [ESC menu]`,
     ].join('\n'));
   }
 

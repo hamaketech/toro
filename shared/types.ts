@@ -39,6 +39,8 @@ export interface DeathEvent {
   cause: DeathCause;
   /** ID of the killer (if applicable) */
   killerId?: string;
+  /** Name of the killer (if applicable) */
+  killerName?: string;
   /** Position where the death occurred */
   x: number;
   y: number;
@@ -51,6 +53,8 @@ export interface DeathEvent {
 /** Player state sent from server to clients */
 export interface PlayerState {
   id: string;
+  /** Display name chosen by player */
+  name: string;
   x: number;
   y: number;
   angle: number;
@@ -71,6 +75,8 @@ export interface PlayerState {
 /** Scoreboard entry */
 export interface ScoreboardEntry {
   id: string;
+  /** Display name */
+  name: string;
   score: number;
   kills: number;
   bodyLength: number;
@@ -131,7 +137,7 @@ export interface ServerToClientEvents {
   /** Game state update */
   gameState: (snapshot: GameSnapshot) => void;
   /** Player joined notification */
-  playerJoined: (playerId: string) => void;
+  playerJoined: (playerId: string, playerName: string) => void;
   /** Player left notification */
   playerLeft: (playerId: string) => void;
   /** Server time sync response */
@@ -144,6 +150,12 @@ export interface ServerToClientEvents {
   playerRespawned: (playerId: string) => void;
 }
 
+/** Options sent when joining the game */
+export interface JoinOptions {
+  /** Player display name */
+  name: string;
+}
+
 export interface ClientToServerEvents {
   /** Player input from client */
   playerInput: (input: PlayerInput) => void;
@@ -151,6 +163,8 @@ export interface ClientToServerEvents {
   ping: (clientTime: number) => void;
   /** Request respawn after death */
   requestRespawn: () => void;
+  /** Join game with name */
+  joinGame: (options: JoinOptions) => void;
 }
 
 // =============================================================================

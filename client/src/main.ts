@@ -1,13 +1,20 @@
 import Phaser from 'phaser';
 import { PHASER_CONFIG } from './config';
+import { MainMenuScene } from './scenes/MainMenuScene';
 import { GameScene } from './scenes/GameScene';
+import { registerBloomPipeline } from './pipelines/BloomPipeline';
 
 /** Main game entry point */
 class ToroGame extends Phaser.Game {
   constructor() {
     super({
       ...PHASER_CONFIG,
-      scene: [GameScene],
+      scene: [MainMenuScene, GameScene],
+    });
+
+    // Register bloom pipeline once the game is ready
+    this.events.once('ready', () => {
+      registerBloomPipeline(this);
     });
   }
 }
@@ -16,4 +23,3 @@ class ToroGame extends Phaser.Game {
 window.addEventListener('load', () => {
   new ToroGame();
 });
-

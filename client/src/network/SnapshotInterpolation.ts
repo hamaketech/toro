@@ -6,6 +6,7 @@ import { GAME_CONFIG } from '../config';
  */
 export interface InterpolatedPlayer {
   id: string;
+  name: string;
   x: number;
   y: number;
   angle: number;
@@ -246,6 +247,7 @@ export class SnapshotInterpolation {
   ): InterpolatedPlayer {
     return {
       id: after.id,
+      name: after.name,
       x: this.lerp(before.x, after.x, t),
       y: this.lerp(before.y, after.y, t),
       angle: this.lerpAngle(before.angle, after.angle, t),
@@ -292,6 +294,7 @@ export class SnapshotInterpolation {
   private playerStateToInterpolated(state: PlayerState): InterpolatedPlayer {
     return {
       id: state.id,
+      name: state.name,
       x: state.x,
       y: state.y,
       angle: state.angle,

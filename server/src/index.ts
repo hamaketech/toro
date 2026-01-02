@@ -13,6 +13,7 @@ import type {
   DeathEvent,
   DeathCause,
   ScoreboardEntry,
+  JoinOptions,
 } from '../../shared/types';
 import { GAME_CONSTANTS } from '../../shared/types';
 
@@ -56,6 +57,8 @@ interface ServerPlayerState extends PlayerState {
   socket: GameSocket;
   /** Time when player can respawn (0 if alive) */
   respawnTime: number;
+  /** Whether player has officially joined (set name) */
+  hasJoined: boolean;
 }
 
 // =============================================================================
@@ -274,7 +277,7 @@ function killPlayer(
 ): void {
   if (!player.alive) return;
   
-  console.log(`Player ${player.id} died: ${cause}${killer ? ` (killed by ${killer.id})` : ''}`);
+  console.log(`Player ${player.name} (${player.id}) died: ${cause}${killer ? ` (killed by ${killer.name})` : ''}`);
   
   // Mark as dead
   player.alive = false;
@@ -319,6 +322,7 @@ function killPlayer(
     playerId: player.id,
     cause,
     killerId: killer?.id,
+    killerName: killer?.name,
     x: player.x,
     y: player.y,
     score: player.score,
@@ -379,8 +383,10 @@ function buildScoreboard(): ScoreboardEntry[] {
   const entries: ScoreboardEntry[] = [];
   
   for (const player of players.values()) {
+    if (!player.hasJoined) continue; // Only show players who have joined
     entries.push({
       id: player.id,
+      name: player.name,
       score: player.score,
       kills: player.kills,
       bodyLength: player.bodySegments.length,
@@ -501,13 +507,17 @@ function handleBoostDrop(player: ServerPlayerState, deltaS: number): void {
 // PLAYER MANAGEMENT
 // =============================================================================
 
-function createPlayer(playerId: string, socket: GameSocket): ServerPlayerState {
+function createPlayer(playerId: string, socket: GameSocket, name = 'Wandering Soul'): ServerPlayerState {
   const startX = WORLD_WIDTH / 2 + (Math.random() - 0.5) * 400;
   const startY = WORLD_HEIGHT / 2 + (Math.random() - 0.5) * 400;
   const startAngle = Math.random() * Math.PI * 2;
   
+  // Sanitize and trim name
+  const sanitizedName = name.trim().substring(0, 16) || 'Wandering Soul';
+  
   const player: ServerPlayerState = {
     id: playerId,
+    name: sanitizedName,
     x: startX,
     y: startY,
     angle: startAngle,
@@ -532,6 +542,7 @@ function createPlayer(playerId: string, socket: GameSocket): ServerPlayerState {
     boostDropAccumulator: 0,
     socket,
     respawnTime: 0,
+    hasJoined: false,
   };
   
   const historyLength = GAME_CONSTANTS.STARTING_BODY_LENGTH * GAME_CONSTANTS.BODY_SEGMENT_SPACING * 2;
@@ -554,6 +565,7 @@ io.on('connection', (socket: GameSocket) => {
   const playerId = socket.id;
   console.log(`Player connected: ${playerId}`);
   
+  // Create player but don't mark as joined yet
   const playerState = createPlayer(playerId, socket);
   players.set(playerId, playerState);
   
@@ -564,11 +576,21 @@ io.on('connection', (socket: GameSocket) => {
   };
   
   socket.emit('connected', initialState);
-  socket.broadcast.emit('playerJoined', playerId);
+  
+  // Handle player joining with name
+  socket.on('joinGame', (options: JoinOptions) => {
+    const player = players.get(playerId);
+    if (player && !player.hasJoined) {
+      player.name = (options.name || 'Wandering Soul').trim().substring(0, 16) || 'Wandering Soul';
+      player.hasJoined = true;
+      console.log(`Player ${player.name} (${playerId}) joined the game`);
+      socket.broadcast.emit('playerJoined', playerId, player.name);
+    }
+  });
   
   socket.on('playerInput', (input: PlayerInput) => {
     const player = players.get(playerId);
-    if (player && player.alive) {
+    if (player && player.alive && player.hasJoined) {
       player.input = input;
       player.lastProcessedInput = input.sequence;
     }
@@ -587,10 +609,10 @@ io.on('connection', (socket: GameSocket) => {
   });
   
   socket.on('disconnect', () => {
-    console.log(`Player disconnected: ${playerId}`);
-    
     const player = players.get(playerId);
-    if (player && player.alive) {
+    console.log(`Player disconnected: ${player?.name || playerId}`);
+    
+    if (player && player.alive && player.hasJoined) {
       killPlayer(player, 'disconnect');
     }
     
@@ -687,8 +709,12 @@ function buildGameSnapshot(): GameSnapshot {
   const playersRecord: Record<string, PlayerState> = {};
   
   for (const [id, player] of players) {
+    // Only include players who have officially joined
+    if (!player.hasJoined) continue;
+    
     playersRecord[id] = {
       id: player.id,
+      name: player.name,
       x: player.x,
       y: player.y,
       angle: player.angle,
@@ -742,7 +768,7 @@ httpServer.listen(PORT, '0.0.0.0', () => {
 ╠═══════════════════════════════════════════════╣
 ║  Server running on http://0.0.0.0:${PORT}        ║
 ║  Tick rate: ${TICK_RATE} Hz                           ║
-║  Phase 4: Combat & Collision Active           ║
+║  Phase 5: Juice & Polish Active               ║
 ╚═══════════════════════════════════════════════╝
   `);
 });
