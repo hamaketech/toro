@@ -92,6 +92,11 @@ export class GameScene extends Phaser.Scene {
   // Input state
   private isBoosting = false;
   private keyboardInput = { x: 0, y: 0, active: false };
+  private isMobile = false;
+  private touchInput = { x: 0, y: 0, active: false }; // Track mobile touch
+  private boostPointerId: number | null = null; // Track which pointer is boosting
+  private boostButtonBg?: Phaser.GameObjects.Arc; // Reference for visual feedback
+  private boostButton?: Phaser.GameObjects.Container;
   private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
   private wasdKeys?: {
     W: Phaser.Input.Keyboard.Key;
@@ -248,6 +253,12 @@ export class GameScene extends Phaser.Scene {
       this.isBoosting = false;
     });
     
+    // Detect mobile
+    this.isMobile = /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent)
+      || ('ontouchstart' in window)
+      || (navigator.maxTouchPoints > 0);
+    
+    // Keyboard boost (desktop)
     this.input.keyboard?.on('keydown-SHIFT', () => {
       if (this.isAlive) {
         this.isBoosting = true;
@@ -258,19 +269,55 @@ export class GameScene extends Phaser.Scene {
       this.isBoosting = false;
     });
     
+    // Desktop: click to boost
+    // Mobile: touch sets movement direction
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
-      if (pointer.leftButtonDown()) {
+      if (!this.isMobile && pointer.leftButtonDown()) {
+        // Desktop: click to boost
         if (this.isAlive) {
           this.isBoosting = true;
         } else {
           this.requestRespawn();
         }
+      } else if (this.isMobile) {
+        if (!this.isAlive) {
+          // Mobile: tap to respawn when dead
+          this.requestRespawn();
+        } else {
+          // Mobile: track touch position for movement
+          this.updateTouchInput(pointer);
+          this.touchInput.active = true;
+        }
       }
     });
     
-    this.input.on('pointerup', () => {
-      this.isBoosting = false;
+    this.input.on('pointermove', (pointer: Phaser.Input.Pointer) => {
+      if (this.isMobile && this.isAlive && pointer.isDown) {
+        this.updateTouchInput(pointer);
+      }
     });
+    
+    this.input.on('pointerup', (pointer: Phaser.Input.Pointer) => {
+      if (!this.isMobile) {
+        this.isBoosting = false;
+      } else {
+        // On mobile: release boost if this was the boost pointer
+        if (pointer.id === this.boostPointerId) {
+          this.boostPointerId = null;
+          this.isBoosting = false;
+          if (this.boostButtonBg) {
+            this.boostButtonBg.setFillStyle(0xff6600, 0.8);
+            this.boostButtonBg.setScale(1);
+          }
+        }
+        // Keep moving in last direction when finger lifts (touch stays active)
+      }
+    });
+    
+    // Create mobile boost button
+    if (this.isMobile) {
+      this.createMobileBoostButton();
+    }
     
     this.input.keyboard?.on('keydown-F3', () => {
       this.showDebug = !this.showDebug;
@@ -290,6 +337,56 @@ export class GameScene extends Phaser.Scene {
     });
   }
   
+  /**
+   * Create a boost button for mobile devices
+   */
+  private createMobileBoostButton(): void {
+    const buttonSize = 100; // Bigger for easier touch
+    const margin = 40;
+    const x = this.cameras.main.width - buttonSize / 2 - margin;
+    const y = this.cameras.main.height - buttonSize / 2 - margin;
+    
+    // Create button container (fixed to camera)
+    this.boostButton = this.add.container(x, y);
+    this.boostButton.setScrollFactor(0);
+    this.boostButton.setDepth(1000);
+    
+    // Button background - larger hit area
+    this.boostButtonBg = this.add.circle(0, 0, buttonSize / 2, 0xff6600, 0.8);
+    this.boostButtonBg.setStrokeStyle(4, 0xffaa00);
+    
+    // Button icon (lightning bolt shape using text)
+    const icon = this.add.text(0, -5, '⚡', {
+      fontSize: '42px',
+    });
+    icon.setOrigin(0.5);
+    
+    // Label
+    const label = this.add.text(0, 25, 'BOOST', {
+      fontSize: '14px',
+      color: '#ffffff',
+      fontStyle: 'bold',
+    });
+    label.setOrigin(0.5);
+    
+    this.boostButton.add([this.boostButtonBg, icon, label]);
+    
+    // Make the whole container interactive with a large hit area
+    this.boostButton.setSize(buttonSize, buttonSize);
+    this.boostButton.setInteractive(new Phaser.Geom.Circle(0, 0, buttonSize / 2), Phaser.Geom.Circle.Contains);
+    
+    this.boostButton.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
+      if (this.isAlive) {
+        this.boostPointerId = pointer.id;
+        this.isBoosting = true;
+        this.boostButtonBg?.setFillStyle(0xffaa00, 1);
+        this.boostButtonBg?.setScale(1.1);
+      }
+    });
+    
+    // pointerup is handled globally in setupInput to catch releases anywhere
+  }
+
   private returnToMenu(): void {
     this.shutdown();
     this.scene.start('MainMenuScene');
@@ -470,6 +567,11 @@ export class GameScene extends Phaser.Scene {
     this.lantern.setVisible(false);
     this.clearLocalBodySegments();
     
+    // Hide boost button on mobile when dead
+    if (this.boostButton) {
+      this.boostButton.setVisible(false);
+    }
+    
     this.deathOverlay = this.add.container(0, 0);
     this.deathOverlay.setScrollFactor(0);
     this.deathOverlay.setDepth(1000);
@@ -527,7 +629,7 @@ export class GameScene extends Phaser.Scene {
     const hintLabel = this.add.text(
       this.cameras.main.width / 2,
       msgY + 120,
-      'Click or Press ENTER to respawn',
+      this.isMobile ? 'Tap to respawn' : 'Click or Press ENTER to respawn',
       {
         fontSize: '16px',
         color: '#88ffcc',
@@ -572,6 +674,11 @@ export class GameScene extends Phaser.Scene {
     
     this.isAlive = true;
     this.lantern.setVisible(true);
+    
+    // Show boost button on mobile
+    if (this.boostButton) {
+      this.boostButton.setVisible(true);
+    }
   }
 
   private requestRespawn(): void {
@@ -825,24 +932,31 @@ export class GameScene extends Phaser.Scene {
       }
       
       // Calculate desired distance from target
-      const spacing = i === 0 ? 35 : 22; // First segment gap vs normal spacing
+      const spacing = i === 0 ? 30 : 20; // First segment gap vs normal spacing
       
       // Vector from current to target
       const dx = targetX - visual.currentX;
       const dy = targetY - visual.currentY;
       const dist = Math.sqrt(dx * dx + dy * dy);
       
-      if (dist > 1) {
+      if (dist > spacing) {
         // Calculate direction
         const dirX = dx / dist;
         const dirY = dy / dist;
         
-        // Move towards target but maintain spacing
-        const targetDist = Math.max(0, dist - spacing);
-        const moveSpeed = 0.15; // Smoothing factor
+        // Move towards target - keep at spacing distance
+        // Use stronger smoothing and snap if too far
+        const overshoot = dist - spacing;
+        const moveSpeed = overshoot > 50 ? 1 : 0.4; // Snap if too far, otherwise smooth
         
-        visual.currentX += dirX * targetDist * moveSpeed;
-        visual.currentY += dirY * targetDist * moveSpeed;
+        visual.currentX += dirX * overshoot * moveSpeed;
+        visual.currentY += dirY * overshoot * moveSpeed;
+      } else if (dist < spacing * 0.5) {
+        // Too close - push away slightly
+        const dirX = dx / dist || 0;
+        const dirY = dy / dist || 0;
+        visual.currentX -= dirX * (spacing - dist) * 0.2;
+        visual.currentY -= dirY * (spacing - dist) * 0.2;
       }
       
       const progress = this.getSegmentProgress(i, segments.length);
@@ -1000,20 +1114,25 @@ export class GameScene extends Phaser.Scene {
         targetY = prevVisual.currentY;
       }
       
-      const spacing = i === 0 ? 35 : 22;
+      const spacing = i === 0 ? 30 : 20;
       
       const dx = targetX - segVisual.currentX;
       const dy = targetY - segVisual.currentY;
       const dist = Math.sqrt(dx * dx + dy * dy);
       
-      if (dist > 1) {
+      if (dist > spacing) {
         const dirX = dx / dist;
         const dirY = dy / dist;
-        const targetDist = Math.max(0, dist - spacing);
-        const moveSpeed = 0.15;
+        const overshoot = dist - spacing;
+        const moveSpeed = overshoot > 50 ? 1 : 0.4;
         
-        segVisual.currentX += dirX * targetDist * moveSpeed;
-        segVisual.currentY += dirY * targetDist * moveSpeed;
+        segVisual.currentX += dirX * overshoot * moveSpeed;
+        segVisual.currentY += dirY * overshoot * moveSpeed;
+      } else if (dist < spacing * 0.5) {
+        const dirX = dx / dist || 0;
+        const dirY = dy / dist || 0;
+        segVisual.currentX -= dirX * (spacing - dist) * 0.2;
+        segVisual.currentY -= dirY * (spacing - dist) * 0.2;
       }
       
       const progress = this.getSegmentProgress(i, segments.length);
@@ -1183,14 +1302,34 @@ export class GameScene extends Phaser.Scene {
   private lastSendTime = 0;
   private readonly SEND_RATE = 50; // Send at 20Hz (every 50ms)
 
+  /**
+   * Update touch input from pointer (for mobile)
+   */
+  private updateTouchInput(pointer: Phaser.Input.Pointer): void {
+    const camera = this.cameras.main;
+    const centerX = camera.width / 2;
+    const centerY = camera.height / 2;
+    
+    const offsetX = pointer.x - centerX;
+    const offsetY = pointer.y - centerY;
+    
+    this.touchInput.x = Phaser.Math.Clamp(offsetX / centerX, -1, 1);
+    this.touchInput.y = Phaser.Math.Clamp(offsetY / centerY, -1, 1);
+  }
+
   private handleLocalMovement(delta: number): void {
     this.updateKeyboardInput();
     
-    // Read input
+    // Read input - priority: keyboard > touch (mobile) > mouse (desktop)
     if (this.keyboardInput.active) {
       this.currentInputX = this.keyboardInput.x;
       this.currentInputY = this.keyboardInput.y;
-    } else {
+    } else if (this.isMobile && this.touchInput.active) {
+      // Mobile: use tracked touch position
+      this.currentInputX = this.touchInput.x;
+      this.currentInputY = this.touchInput.y;
+    } else if (!this.isMobile) {
+      // Desktop: use current mouse position
       const pointer = this.input.activePointer;
       const camera = this.cameras.main;
       
