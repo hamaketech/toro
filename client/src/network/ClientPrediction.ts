@@ -49,13 +49,15 @@ export class ClientPrediction {
   /**
    * Process input and predict movement (called every frame)
    * Returns the predicted position
+   * @param canBoost - Whether the player has body segments to burn for boost
    */
   processInput(
     mouseX: number,
     mouseY: number,
     boosting: boolean,
     deltaMs: number,
-    sequence: number
+    sequence: number,
+    canBoost = true
   ): { x: number; y: number; angle: number; speed: number } {
     const deltaS = deltaMs / 1000;
 
@@ -84,8 +86,9 @@ export class ClientPrediction {
       const speedFactor = Math.min(distance, 1);
       const baseSpeed = GAME_CONFIG.PLAYER.BASE_SPEED * speedFactor;
 
-      // Apply boost if active
-      this.currentSpeed = boosting
+      // Apply boost only if active AND player has body segments to burn
+      const effectiveBoosting = boosting && canBoost;
+      this.currentSpeed = effectiveBoosting
         ? baseSpeed * GAME_CONFIG.PLAYER.BOOST_MULTIPLIER
         : baseSpeed;
     } else {

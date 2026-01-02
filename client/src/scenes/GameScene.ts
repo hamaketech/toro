@@ -29,6 +29,12 @@ interface BodySegmentVisual {
   glow: Phaser.GameObjects.Arc;
   core: Phaser.GameObjects.Arc;
   phaseOffset: number;
+  // Smoothed position (interpolated)
+  currentX: number;
+  currentY: number;
+  // Velocity for smooth following
+  velX: number;
+  velY: number;
 }
 
 interface RemotePlayerVisual {
@@ -773,13 +779,21 @@ export class GameScene extends Phaser.Scene {
       const index = this.localBodySegments.length;
       const phaseOffset = Math.random() * Math.PI * 2;
       
+      // Initialize position from server or use head position
+      const initX = segments[index]?.x ?? this.lantern.x;
+      const initY = segments[index]?.y ?? this.lantern.y;
+      
       const glow = this.add.arc(0, 0, 10, 0, 360, false, SPIRIT_GLOW_HEAD, 0.5);
       const core = this.add.arc(0, 0, 5, 0, 360, false, SPIRIT_CORE_HEAD, 1);
       
       glow.setDepth(50 - index);
       core.setDepth(51 - index);
       
-      this.localBodySegments.push({ glow, core, phaseOffset });
+      this.localBodySegments.push({ 
+        glow, core, phaseOffset, 
+        currentX: initX, currentY: initY,
+        velX: 0, velY: 0
+      });
     }
     
     while (this.localBodySegments.length > segments.length) {
@@ -790,22 +804,65 @@ export class GameScene extends Phaser.Scene {
       }
     }
     
+    // First segment follows the head with spring physics
+    // Other segments follow the previous segment
     for (let i = 0; i < segments.length; i++) {
-      const segment = segments[i];
       const visual = this.localBodySegments[i];
-      const prevSegment = i > 0 ? segments[i - 1] : null;
+      
+      // Determine what this segment should follow
+      let targetX: number;
+      let targetY: number;
+      
+      if (i === 0) {
+        // First segment follows the head (lantern)
+        targetX = this.lantern.x;
+        targetY = this.lantern.y;
+      } else {
+        // Other segments follow the previous segment's smoothed position
+        const prevVisual = this.localBodySegments[i - 1];
+        targetX = prevVisual.currentX;
+        targetY = prevVisual.currentY;
+      }
+      
+      // Calculate desired distance from target
+      const spacing = i === 0 ? 35 : 22; // First segment gap vs normal spacing
+      
+      // Vector from current to target
+      const dx = targetX - visual.currentX;
+      const dy = targetY - visual.currentY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist > 1) {
+        // Calculate direction
+        const dirX = dx / dist;
+        const dirY = dy / dist;
+        
+        // Move towards target but maintain spacing
+        const targetDist = Math.max(0, dist - spacing);
+        const moveSpeed = 0.15; // Smoothing factor
+        
+        visual.currentX += dirX * targetDist * moveSpeed;
+        visual.currentY += dirY * targetDist * moveSpeed;
+      }
       
       const progress = this.getSegmentProgress(i, segments.length);
       const radius = this.getSegmentRadius(progress);
       const opacity = this.getSegmentOpacity(progress);
       
-      const wobble = this.getWobbleOffset(i, visual.phaseOffset, prevSegment, segment);
+      // Use smoothed position for wobble calculation
+      const smoothedSegment = { x: visual.currentX, y: visual.currentY };
+      const smoothedPrev = i > 0 ? { 
+        x: this.localBodySegments[i - 1].currentX, 
+        y: this.localBodySegments[i - 1].currentY 
+      } : null;
+      
+      const wobble = this.getWobbleOffset(i, visual.phaseOffset, smoothedPrev, smoothedSegment);
       
       const pulsePhase = this.animTime * PULSE_SPEED + visual.phaseOffset;
       const pulse = 1 + Math.sin(pulsePhase) * PULSE_AMOUNT * (1 - progress * 0.5);
       
-      const finalX = segment.x + wobble.x;
-      const finalY = segment.y + wobble.y;
+      const finalX = visual.currentX + wobble.x;
+      const finalY = visual.currentY + wobble.y;
       
       visual.glow.setPosition(finalX, finalY);
       visual.core.setPosition(finalX, finalY);
@@ -884,6 +941,13 @@ export class GameScene extends Phaser.Scene {
     
     visual.container.setPosition(state.x, state.y);
     visual.nameText.setText(state.name);
+    
+    // Scale devil mask based on body segments (same formula as local player)
+    const bodyCount = state.bodySegments.length;
+    const sizeMultiplier = 1 + Math.min(bodyCount * 0.03, 0.6);
+    visual.glow.setScale(1.3 * sizeMultiplier);
+    visual.core.setScale(0.75 * sizeMultiplier);
+    
     this.updateOtherPlayerBodySegments(visual, state.bodySegments);
   }
 
@@ -895,13 +959,20 @@ export class GameScene extends Phaser.Scene {
       const index = visual.bodySegments.length;
       const phaseOffset = Math.random() * Math.PI * 2;
       
+      const initX = segments[index]?.x ?? visual.container.x;
+      const initY = segments[index]?.y ?? visual.container.y;
+      
       const glow = this.add.arc(0, 0, 10, 0, 360, false, OTHER_SPIRIT_GLOW_HEAD, 0.5);
       const core = this.add.arc(0, 0, 5, 0, 360, false, OTHER_SPIRIT_CORE_HEAD, 1);
       
       glow.setDepth(40 - index);
       core.setDepth(41 - index);
       
-      visual.bodySegments.push({ glow, core, phaseOffset });
+      visual.bodySegments.push({ 
+        glow, core, phaseOffset, 
+        currentX: initX, currentY: initY, 
+        velX: 0, velY: 0 
+      });
     }
     
     while (visual.bodySegments.length > segments.length) {
@@ -912,22 +983,56 @@ export class GameScene extends Phaser.Scene {
       }
     }
     
+    // Smooth segment following (same as local player)
     for (let i = 0; i < segments.length; i++) {
-      const segment = segments[i];
       const segVisual = visual.bodySegments[i];
-      const prevSegment = i > 0 ? segments[i - 1] : null;
+      
+      // Determine target
+      let targetX: number;
+      let targetY: number;
+      
+      if (i === 0) {
+        targetX = visual.container.x;
+        targetY = visual.container.y;
+      } else {
+        const prevVisual = visual.bodySegments[i - 1];
+        targetX = prevVisual.currentX;
+        targetY = prevVisual.currentY;
+      }
+      
+      const spacing = i === 0 ? 35 : 22;
+      
+      const dx = targetX - segVisual.currentX;
+      const dy = targetY - segVisual.currentY;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      if (dist > 1) {
+        const dirX = dx / dist;
+        const dirY = dy / dist;
+        const targetDist = Math.max(0, dist - spacing);
+        const moveSpeed = 0.15;
+        
+        segVisual.currentX += dirX * targetDist * moveSpeed;
+        segVisual.currentY += dirY * targetDist * moveSpeed;
+      }
       
       const progress = this.getSegmentProgress(i, segments.length);
       const radius = this.getSegmentRadius(progress);
       const opacity = this.getSegmentOpacity(progress);
       
-      const wobble = this.getWobbleOffset(i, segVisual.phaseOffset, prevSegment, segment);
+      const smoothedSegment = { x: segVisual.currentX, y: segVisual.currentY };
+      const smoothedPrev = i > 0 ? { 
+        x: visual.bodySegments[i - 1].currentX, 
+        y: visual.bodySegments[i - 1].currentY 
+      } : null;
+      
+      const wobble = this.getWobbleOffset(i, segVisual.phaseOffset, smoothedPrev, smoothedSegment);
       
       const pulsePhase = this.animTime * PULSE_SPEED + segVisual.phaseOffset;
       const pulse = 1 + Math.sin(pulsePhase) * PULSE_AMOUNT * (1 - progress * 0.5);
       
-      const finalX = segment.x + wobble.x;
-      const finalY = segment.y + wobble.y;
+      const finalX = segVisual.currentX + wobble.x;
+      const finalY = segVisual.currentY + wobble.y;
       
       segVisual.glow.setPosition(finalX, finalY);
       segVisual.core.setPosition(finalX, finalY);
@@ -979,22 +1084,33 @@ export class GameScene extends Phaser.Scene {
   private updateFoodVisual(id: string, state: InterpolatedFood): void {
     let visual = this.foodVisuals.get(id);
     
+    // Detect golden food (value > base value)
+    const isGolden = state.value > 1;
+    const sizeMultiplier = isGolden ? 1.3 : 1;
+    
     if (!visual) {
       const container = this.add.container(state.x, state.y);
-      container.setDepth(10);
+      container.setDepth(isGolden ? 15 : 10); // Golden food renders on top
       
       const phaseOffset = Math.random() * Math.PI * 2;
       
-      // Ghost glow (cyan ethereal glow)
+      // Ghost glow
       const glow = this.add.image(0, 0, 'ghost');
-      glow.setScale(1.4);
-      glow.setTint(0x44ffcc); // Cyan glow
-      glow.setAlpha(0.35);
+      glow.setScale(1.4 * sizeMultiplier);
+      glow.setAlpha(isGolden ? 0.5 : 0.35);
       
       // Ghost core
       const core = this.add.image(0, 0, 'ghost');
-      core.setScale(0.8);
-      glow.setTint(0xccffee); // Light cyan/white
+      core.setScale(0.8 * sizeMultiplier);
+      
+      // Apply colors based on type
+      if (isGolden) {
+        glow.setTint(0xffaa00); // Golden orange glow
+        core.setTint(0xffdd44); // Bright gold
+      } else {
+        glow.setTint(0x44ffcc); // Cyan ethereal glow
+        core.setTint(0xccffee); // Light cyan
+      }
       
       container.add([glow, core]);
       
@@ -1004,19 +1120,30 @@ export class GameScene extends Phaser.Scene {
     
     visual.container.setPosition(state.x, state.y);
     
-    // Floating animation
-    const floatPhase = this.animTime * 2 + visual.phaseOffset;
-    const floatY = Math.sin(floatPhase) * 3;
+    // Floating animation - golden food floats more dramatically
+    const floatSpeed = isGolden ? 3 : 2;
+    const floatAmount = isGolden ? 5 : 3;
+    const floatPhase = this.animTime * floatSpeed + visual.phaseOffset;
+    const floatY = Math.sin(floatPhase) * floatAmount;
     visual.core.setY(floatY);
     visual.glow.setY(floatY);
     
-    // Pulse animation
-    const pulse = 1 + Math.sin(this.animTime * GAME_CONFIG.FOOD.PULSE_SPEED + visual.phaseOffset) * 0.15;
-    visual.core.setScale(0.8 * pulse);
-    visual.glow.setScale(1.4 * pulse);
+    // Pulse animation - golden food pulses faster and more
+    const pulseSpeed = isGolden ? GAME_CONFIG.FOOD.PULSE_SPEED * 1.5 : GAME_CONFIG.FOOD.PULSE_SPEED;
+    const pulseAmount = isGolden ? 0.25 : 0.15;
+    const pulse = 1 + Math.sin(this.animTime * pulseSpeed + visual.phaseOffset) * pulseAmount;
+    visual.core.setScale(0.8 * sizeMultiplier * pulse);
+    visual.glow.setScale(1.4 * sizeMultiplier * pulse);
     
-    // Glow opacity pulse
-    visual.glow.setAlpha(0.3 + Math.sin(floatPhase) * 0.1);
+    // Glow breathing - golden food glows brighter
+    const baseAlpha = isGolden ? 0.4 : 0.25;
+    const alphaRange = isGolden ? 0.15 : 0.1;
+    visual.glow.setAlpha(baseAlpha + Math.sin(this.animTime * 3 + visual.phaseOffset) * alphaRange);
+    
+    // Golden food slight rotation shimmer
+    if (isGolden) {
+      visual.core.setRotation(Math.sin(this.animTime * 2) * 0.1);
+    }
   }
 
   private removeFoodVisual(id: string): void {
@@ -1074,28 +1201,41 @@ export class GameScene extends Phaser.Scene {
     
     const sequence = this.clientPrediction.getNextSequence();
     
+    // Check if player has body segments to burn for boost
+    const latestState = this.snapshotInterpolation.getLatestPlayerState(this.playerId || '');
+    const canBoost = (latestState?.targetLength ?? 0) > 0;
+    
     const predicted = this.clientPrediction.processInput(
       inputX,
       inputY,
       this.isBoosting,
       delta,
-      sequence
+      sequence,
+      canBoost
     );
     
     this.lantern.setPosition(predicted.x, predicted.y);
+    
+    // Size scaling based on body segments (more food = bigger lantern)
+    // +3% per segment, max +60% at 20+ segments
+    const bodyCount = this.localBodySegments.length;
+    const sizeMultiplier = 1 + Math.min(bodyCount * 0.03, 0.6);
     
     // Boost visual feedback
     const boostPulse = this.isBoosting ? 1 + Math.sin(this.animTime * 8) * 0.1 : 1;
     
     if (this.isBoosting) {
-      this.lanternGlow.setScale(1.6 * boostPulse);
+      this.lanternGlow.setScale(1.6 * sizeMultiplier * boostPulse);
       this.lanternGlow.setAlpha(0.6);
       this.lanternGlow.setTint(0xffaa44); // Brighter orange when boosting
     } else {
-      this.lanternGlow.setScale(1.4);
+      this.lanternGlow.setScale(1.4 * sizeMultiplier);
       this.lanternGlow.setAlpha(0.4);
       this.lanternGlow.setTint(0xffcc66);
     }
+    
+    // Scale core sprite as well
+    this.lanternCore.setScale(0.8 * sizeMultiplier);
     
     // Visual warning when near world border
     const pos = predicted;

@@ -10,9 +10,9 @@ export const GAME_CONFIG = {
   /** Server connection settings */
   SERVER_URL: getServerUrl(),
   
-  /** Game world dimensions */
-  WORLD_WIDTH: 2000,
-  WORLD_HEIGHT: 2000,
+  /** Game world dimensions (larger = more competitive) */
+  WORLD_WIDTH: 6000,
+  WORLD_HEIGHT: 6000,
   
   /** Player settings */
   PLAYER: {

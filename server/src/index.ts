@@ -24,8 +24,8 @@ import { GAME_CONSTANTS } from '../../shared/types';
 const PORT = 3001;
 const TICK_RATE = 20;
 
-const WORLD_WIDTH = 2000;
-const WORLD_HEIGHT = 2000;
+const WORLD_WIDTH = 6000;
+const WORLD_HEIGHT = 6000;
 
 const PLAYER_CONFIG = {
   RADIUS: 20,
@@ -101,39 +101,182 @@ function generateFoodId(): string {
   return `food_${++foodIdCounter}`;
 }
 
+// Food spawning configuration
+const FOOD_CONFIG = {
+  CLUSTER_CHANCE: 0.15,       // 15% chance to spawn a cluster instead of single food
+  CLUSTER_SIZE_MIN: 3,
+  CLUSTER_SIZE_MAX: 6,
+  CLUSTER_SPREAD: 80,         // How spread out cluster food is
+  GOLDEN_CHANCE: 0.05,        // 5% chance for golden (high value) food
+  GOLDEN_MULTIPLIER: 3,       // Golden food worth 3x
+  EDGE_BIAS: 0.3,             // 30% chance to spawn near edges
+  EDGE_MARGIN: 400,           // Distance from edge for edge spawns
+  PLAYER_AVOIDANCE_RADIUS: 300, // Try not to spawn within this radius of players
+  SPAWN_RATE_PER_PLAYER: 0.5, // Extra spawn rate per active player
+  BURST_CHANCE: 0.02,         // 2% chance per tick for a food burst event
+  BURST_SIZE: 8,              // How many food in a burst
+};
+
+let tickCounter = 0;
+
 function spawnFood(x?: number, y?: number, value?: number): Hitodama {
   const id = generateFoodId();
   const padding = 50;
+  
+  // Determine if this is golden food (only for natural spawns)
+  const isGolden = value === undefined && Math.random() < FOOD_CONFIG.GOLDEN_CHANCE;
+  const foodValue = value ?? (isGolden ? GAME_CONSTANTS.FOOD_BASE_VALUE * FOOD_CONFIG.GOLDEN_MULTIPLIER : GAME_CONSTANTS.FOOD_BASE_VALUE);
   
   const hitodama: Hitodama = {
     id,
     x: x ?? padding + Math.random() * (WORLD_WIDTH - padding * 2),
     y: y ?? padding + Math.random() * (WORLD_HEIGHT - padding * 2),
-    value: value ?? GAME_CONSTANTS.FOOD_BASE_VALUE,
-    radius: GAME_CONSTANTS.FOOD_RADIUS,
+    value: foodValue,
+    radius: isGolden ? GAME_CONSTANTS.FOOD_RADIUS * 1.3 : GAME_CONSTANTS.FOOD_RADIUS,
   };
   
   food.set(id, hitodama);
   return hitodama;
 }
 
+function findSpawnLocation(): { x: number; y: number } {
+  const padding = 50;
+  
+  // Edge bias - sometimes spawn near edges to encourage exploration
+  if (Math.random() < FOOD_CONFIG.EDGE_BIAS) {
+    const edge = Math.floor(Math.random() * 4);
+    switch (edge) {
+      case 0: // Top
+        return { 
+          x: padding + Math.random() * (WORLD_WIDTH - padding * 2),
+          y: padding + Math.random() * FOOD_CONFIG.EDGE_MARGIN
+        };
+      case 1: // Bottom
+        return { 
+          x: padding + Math.random() * (WORLD_WIDTH - padding * 2),
+          y: WORLD_HEIGHT - padding - Math.random() * FOOD_CONFIG.EDGE_MARGIN
+        };
+      case 2: // Left
+        return { 
+          x: padding + Math.random() * FOOD_CONFIG.EDGE_MARGIN,
+          y: padding + Math.random() * (WORLD_HEIGHT - padding * 2)
+        };
+      case 3: // Right
+        return { 
+          x: WORLD_WIDTH - padding - Math.random() * FOOD_CONFIG.EDGE_MARGIN,
+          y: padding + Math.random() * (WORLD_HEIGHT - padding * 2)
+        };
+    }
+  }
+  
+  // Try to spawn away from players (3 attempts)
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const x = padding + Math.random() * (WORLD_WIDTH - padding * 2);
+    const y = padding + Math.random() * (WORLD_HEIGHT - padding * 2);
+    
+    let tooClose = false;
+    for (const player of players.values()) {
+      if (!player.alive) continue;
+      const dx = player.x - x;
+      const dy = player.y - y;
+      if (Math.sqrt(dx * dx + dy * dy) < FOOD_CONFIG.PLAYER_AVOIDANCE_RADIUS) {
+        tooClose = true;
+        break;
+      }
+    }
+    
+    if (!tooClose) {
+      return { x, y };
+    }
+  }
+  
+  // Fallback to random location
+  return {
+    x: padding + Math.random() * (WORLD_WIDTH - padding * 2),
+    y: padding + Math.random() * (WORLD_HEIGHT - padding * 2)
+  };
+}
+
+function spawnFoodCluster(centerX: number, centerY: number): void {
+  const clusterSize = FOOD_CONFIG.CLUSTER_SIZE_MIN + 
+    Math.floor(Math.random() * (FOOD_CONFIG.CLUSTER_SIZE_MAX - FOOD_CONFIG.CLUSTER_SIZE_MIN + 1));
+  
+  for (let i = 0; i < clusterSize; i++) {
+    const angle = (i / clusterSize) * Math.PI * 2 + Math.random() * 0.5;
+    const dist = Math.random() * FOOD_CONFIG.CLUSTER_SPREAD;
+    const x = centerX + Math.cos(angle) * dist;
+    const y = centerY + Math.sin(angle) * dist;
+    
+    // Clamp to world bounds
+    const padding = 50;
+    const clampedX = Math.max(padding, Math.min(WORLD_WIDTH - padding, x));
+    const clampedY = Math.max(padding, Math.min(WORLD_HEIGHT - padding, y));
+    
+    spawnFood(clampedX, clampedY);
+  }
+}
+
 function spawnInitialFood(): void {
   const initialCount = Math.floor(GAME_CONSTANTS.MAX_FOOD_COUNT * 0.7);
-  for (let i = 0; i < initialCount; i++) {
-    spawnFood();
+  
+  // Spawn some clusters and some individual food
+  const clusterCount = Math.floor(initialCount / 8);
+  let spawned = 0;
+  
+  // Spawn clusters first
+  for (let i = 0; i < clusterCount && spawned < initialCount; i++) {
+    const loc = findSpawnLocation();
+    spawnFoodCluster(loc.x, loc.y);
+    spawned += FOOD_CONFIG.CLUSTER_SIZE_MIN;
   }
-  console.log(`Spawned ${initialCount} initial food items`);
+  
+  // Fill rest with individual food
+  while (spawned < initialCount) {
+    const loc = findSpawnLocation();
+    spawnFood(loc.x, loc.y);
+    spawned++;
+  }
+  
+  console.log(`Spawned ${food.size} initial food items (with clusters)`);
 }
 
 function maintainFoodCount(): void {
+  tickCounter++;
   const currentCount = food.size;
-  if (currentCount < GAME_CONSTANTS.MAX_FOOD_COUNT) {
-    const toSpawn = Math.min(
-      GAME_CONSTANTS.FOOD_SPAWN_RATE,
-      GAME_CONSTANTS.MAX_FOOD_COUNT - currentCount
-    );
-    for (let i = 0; i < toSpawn; i++) {
-      spawnFood();
+  
+  if (currentCount >= GAME_CONSTANTS.MAX_FOOD_COUNT) return;
+  
+  // Dynamic spawn rate based on player count
+  const activePlayers = [...players.values()].filter(p => p.alive).length;
+  const dynamicSpawnRate = GAME_CONSTANTS.FOOD_SPAWN_RATE + 
+    Math.floor(activePlayers * FOOD_CONFIG.SPAWN_RATE_PER_PLAYER);
+  
+  // Food burst event - exciting moment where lots of food appears
+  if (Math.random() < FOOD_CONFIG.BURST_CHANCE && currentCount < GAME_CONSTANTS.MAX_FOOD_COUNT * 0.8) {
+    const burstLoc = findSpawnLocation();
+    console.log(`Food burst at (${Math.round(burstLoc.x)}, ${Math.round(burstLoc.y)})!`);
+    for (let i = 0; i < FOOD_CONFIG.BURST_SIZE; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const dist = Math.random() * 120;
+      spawnFood(
+        burstLoc.x + Math.cos(angle) * dist,
+        burstLoc.y + Math.sin(angle) * dist
+      );
+    }
+    return;
+  }
+  
+  // Regular spawning
+  const toSpawn = Math.min(dynamicSpawnRate, GAME_CONSTANTS.MAX_FOOD_COUNT - currentCount);
+  
+  for (let i = 0; i < toSpawn; i++) {
+    // Occasionally spawn a cluster instead of single food
+    if (Math.random() < FOOD_CONFIG.CLUSTER_CHANCE && currentCount + 5 < GAME_CONSTANTS.MAX_FOOD_COUNT) {
+      const loc = findSpawnLocation();
+      spawnFoodCluster(loc.x, loc.y);
+    } else {
+      const loc = findSpawnLocation();
+      spawnFood(loc.x, loc.y);
     }
   }
 }
@@ -142,14 +285,19 @@ function updateFoodMagnetism(deltaS: number): void {
   for (const player of players.values()) {
     if (!player.alive) continue;
     
+    // Bigger players have stronger pull (1x base, up to 2.5x at 20+ segments)
+    const bodyCount = player.bodySegments.length;
+    const sizePullMultiplier = 1 + Math.min(bodyCount * 0.075, 1.5);
+    const magnetRadius = GAME_CONSTANTS.FOOD_MAGNET_RADIUS * (1 + Math.min(bodyCount * 0.02, 0.4));
+    
     for (const item of food.values()) {
       const dx = player.x - item.x;
       const dy = player.y - item.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
       
-      if (distance < GAME_CONSTANTS.FOOD_MAGNET_RADIUS && distance > 0) {
-        const pullFactor = 1 - (distance / GAME_CONSTANTS.FOOD_MAGNET_RADIUS);
-        const pullStrength = GAME_CONSTANTS.FOOD_MAGNET_STRENGTH * pullFactor * pullFactor;
+      if (distance < magnetRadius && distance > 0) {
+        const pullFactor = 1 - (distance / magnetRadius);
+        const pullStrength = GAME_CONSTANTS.FOOD_MAGNET_STRENGTH * pullFactor * pullFactor * sizePullMultiplier;
         
         const normalizedDx = dx / distance;
         const normalizedDy = dy / distance;
@@ -336,8 +484,8 @@ function respawnPlayer(player: ServerPlayerState): void {
   console.log(`Player ${player.id} respawning`);
   
   // Reset position to random location
-  player.x = WORLD_WIDTH / 2 + (Math.random() - 0.5) * 600;
-  player.y = WORLD_HEIGHT / 2 + (Math.random() - 0.5) * 600;
+  player.x = WORLD_WIDTH / 2 + (Math.random() - 0.5) * 2000;
+  player.y = WORLD_HEIGHT / 2 + (Math.random() - 0.5) * 2000;
   player.angle = Math.random() * Math.PI * 2;
   player.currentAngle = player.angle;
   player.targetAngle = player.angle;
@@ -508,8 +656,8 @@ function handleBoostDrop(player: ServerPlayerState, deltaS: number): void {
 // =============================================================================
 
 function createPlayer(playerId: string, socket: GameSocket, name = 'Wandering Soul'): ServerPlayerState {
-  const startX = WORLD_WIDTH / 2 + (Math.random() - 0.5) * 400;
-  const startY = WORLD_HEIGHT / 2 + (Math.random() - 0.5) * 400;
+  const startX = WORLD_WIDTH / 2 + (Math.random() - 0.5) * 1500;
+  const startY = WORLD_HEIGHT / 2 + (Math.random() - 0.5) * 1500;
   const startAngle = Math.random() * Math.PI * 2;
   
   // Sanitize and trim name
@@ -682,7 +830,9 @@ function updatePlayerMovement(player: ServerPlayerState, deltaS: number): void {
     const speedFactor = Math.min(distance, 1);
     const baseSpeed = PLAYER_CONFIG.BASE_SPEED * speedFactor;
     
-    player.currentSpeed = input.boosting 
+    // Only allow boosting if player has body segments to burn
+    const canBoost = input.boosting && player.targetLength > GAME_CONSTANTS.MIN_BODY_LENGTH;
+    player.currentSpeed = canBoost 
       ? baseSpeed * PLAYER_CONFIG.BOOST_MULTIPLIER 
       : baseSpeed;
   } else {

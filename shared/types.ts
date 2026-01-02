@@ -194,10 +194,10 @@ export const GAME_CONSTANTS = {
   MIN_BODY_LENGTH: 0,
   /** Starting body length for new players */
   STARTING_BODY_LENGTH: 3,
-  /** Maximum food items in the world */
-  MAX_FOOD_COUNT: 200,
+  /** Maximum food items in the world (less = more competitive) */
+  MAX_FOOD_COUNT: 100,
   /** Food spawn rate per tick when below max */
-  FOOD_SPAWN_RATE: 3,
+  FOOD_SPAWN_RATE: 1,
   /** Dropped pellet value (from boosting or death) */
   DROPPED_PELLET_VALUE: 1,
   /** Death drop value multiplier (body segments worth more on death) */
