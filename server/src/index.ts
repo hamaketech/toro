@@ -48,7 +48,7 @@ const app = express();
 const httpServer = createServer(app);
 const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
   cors: {
-    origin: 'http://localhost:3000',
+    origin: '*', // Allow any origin for local network testing
     methods: ['GET', 'POST'],
   },
 });
@@ -240,13 +240,14 @@ function clamp(value: number, min: number, max: number): number {
 // Start game loop
 setInterval(gameLoop, 1000 / TICK_RATE);
 
-// Start server
-httpServer.listen(PORT, () => {
+// Start server on all interfaces (0.0.0.0) for local network access
+httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ╔═══════════════════════════════════════════════╗
 ║     🏮 Tōrō Server - River of Souls 🏮        ║
 ╠═══════════════════════════════════════════════╣
-║  Server running on http://localhost:${PORT}      ║
+║  Server running on http://0.0.0.0:${PORT}        ║
+║  Local network: http://10.1.1.189:${PORT}        ║
 ║  Tick rate: ${TICK_RATE} Hz                           ║
 ║  Phase 2: Multiplayer Movement Active         ║
 ╚═══════════════════════════════════════════════╝

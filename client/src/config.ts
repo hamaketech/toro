@@ -1,8 +1,14 @@
 import Phaser from 'phaser';
 
+// Dynamically determine server URL based on current host (enables mobile/network testing)
+const getServerUrl = () => {
+  const hostname = window.location.hostname;
+  return `http://${hostname}:3001`;
+};
+
 export const GAME_CONFIG = {
   /** Server connection settings */
-  SERVER_URL: 'http://localhost:3001',
+  SERVER_URL: getServerUrl(),
   
   /** Game world dimensions */
   WORLD_WIDTH: 2000,
