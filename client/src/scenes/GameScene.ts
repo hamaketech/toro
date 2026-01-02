@@ -1,16 +1,43 @@
 import Phaser from 'phaser';
 import { io, Socket } from 'socket.io-client';
 import { GAME_CONFIG } from '../config';
-import type { ServerToClientEvents, ClientToServerEvents, PlayerInput, GameSnapshot, PlayerState } from '@shared/types';
+import { SnapshotInterpolation, InterpolatedPlayer } from '../network/SnapshotInterpolation';
+import { ClientPrediction } from '../network/ClientPrediction';
+import type { 
+  ServerToClientEvents, 
+  ClientToServerEvents, 
+  PlayerInput, 
+  GameSnapshot, 
+  InitialGameState 
+} from '@shared/types';
 
 type GameSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 
 /**
+ * Remote player visual representation
+ */
+interface RemotePlayerVisual {
+  container: Phaser.GameObjects.Container;
+  glow: Phaser.GameObjects.Arc;
+  core: Phaser.GameObjects.Arc;
+}
+
+/**
  * Main game scene - handles player movement, rendering, and server communication
+ * 
+ * Phase 2 features:
+ * - Snapshot interpolation for smooth remote player movement
+ * - Client-side prediction for responsive local movement
+ * - Server reconciliation to correct prediction errors
  */
 export class GameScene extends Phaser.Scene {
   private socket!: GameSocket;
   private playerId: string | null = null;
+  
+  // Network systems
+  private snapshotInterpolation!: SnapshotInterpolation;
+  private clientPrediction!: ClientPrediction;
+  private timeSyncInterval?: number;
   
   // Graphics objects
   private lantern!: Phaser.GameObjects.Container;
@@ -18,28 +45,31 @@ export class GameScene extends Phaser.Scene {
   private lanternCore!: Phaser.GameObjects.Arc;
   
   // Other players
-  private otherPlayers: Map<string, Phaser.GameObjects.Container> = new Map();
-  
-  // Movement state
-  private currentAngle = 0;
-  private targetAngle = 0;
-  private currentSpeed = 0;
+  private otherPlayers: Map<string, RemotePlayerVisual> = new Map();
   
   // Input state
   private isBoosting = false;
   
   // World bounds graphics
   private worldBounds!: Phaser.GameObjects.Graphics;
+  
+  // Debug display
+  private debugText?: Phaser.GameObjects.Text;
+  private showDebug = false;
 
   constructor() {
     super({ key: 'GameScene' });
   }
 
   create(): void {
+    // Initialize network systems
+    this.snapshotInterpolation = new SnapshotInterpolation();
+    
     this.setupWorld();
     this.createPlayer();
     this.setupInput();
     this.connectToServer();
+    this.setupDebug();
   }
 
   private setupWorld(): void {
@@ -71,17 +101,30 @@ export class GameScene extends Phaser.Scene {
   }
 
   private createPlayer(): void {
+    const startX = GAME_CONFIG.WORLD_WIDTH / 2;
+    const startY = GAME_CONFIG.WORLD_HEIGHT / 2;
+    
+    // Initialize client prediction
+    this.clientPrediction = new ClientPrediction(startX, startY, 0);
+    
     // Create lantern container (will hold glow + core)
-    this.lantern = this.add.container(
-      GAME_CONFIG.WORLD_WIDTH / 2,
-      GAME_CONFIG.WORLD_HEIGHT / 2
-    );
+    this.lantern = this.add.container(startX, startY);
     
     // Outer glow effect
-    this.lanternGlow = this.add.arc(0, 0, GAME_CONFIG.PLAYER.RADIUS * 2, 0, 360, false, GAME_CONFIG.COLORS.LANTERN_GLOW, 0.3);
+    this.lanternGlow = this.add.arc(
+      0, 0, 
+      GAME_CONFIG.PLAYER.RADIUS * 2, 
+      0, 360, false, 
+      GAME_CONFIG.COLORS.LANTERN_GLOW, 0.3
+    );
     
     // Inner core (the actual hitbox visualization)
-    this.lanternCore = this.add.arc(0, 0, GAME_CONFIG.PLAYER.RADIUS, 0, 360, false, GAME_CONFIG.COLORS.LANTERN_CORE, 1);
+    this.lanternCore = this.add.arc(
+      0, 0, 
+      GAME_CONFIG.PLAYER.RADIUS, 
+      0, 360, false, 
+      GAME_CONFIG.COLORS.LANTERN_CORE, 1
+    );
     
     // Add to container
     this.lantern.add([this.lanternGlow, this.lanternCore]);
@@ -89,9 +132,6 @@ export class GameScene extends Phaser.Scene {
     // Camera follows the lantern
     this.cameras.main.startFollow(this.lantern, true, 0.1, 0.1);
     this.cameras.main.setZoom(1);
-    
-    // Spawn at center of world
-    this.currentAngle = 0;
   }
 
   private setupInput(): void {
@@ -113,6 +153,26 @@ export class GameScene extends Phaser.Scene {
     this.input.on('pointerup', () => {
       this.isBoosting = false;
     });
+    
+    // Toggle debug with F3
+    this.input.keyboard?.on('keydown-F3', () => {
+      this.showDebug = !this.showDebug;
+      if (this.debugText) {
+        this.debugText.setVisible(this.showDebug);
+      }
+    });
+  }
+
+  private setupDebug(): void {
+    this.debugText = this.add.text(10, 10, '', {
+      fontSize: '14px',
+      color: '#88ff88',
+      backgroundColor: '#000000aa',
+      padding: { x: 8, y: 4 },
+    });
+    this.debugText.setScrollFactor(0);
+    this.debugText.setDepth(1000);
+    this.debugText.setVisible(this.showDebug);
   }
 
   private connectToServer(): void {
@@ -120,13 +180,30 @@ export class GameScene extends Phaser.Scene {
       transports: ['websocket'],
     });
     
-    this.socket.on('connected', (playerId: string) => {
-      console.log('Connected to server with ID:', playerId);
-      this.playerId = playerId;
+    this.socket.on('connected', (state: InitialGameState) => {
+      console.log('Connected to server with ID:', state.playerId);
+      this.playerId = state.playerId;
+      
+      // Get our initial position from server
+      const myState = state.snapshot.players[state.playerId];
+      if (myState) {
+        this.clientPrediction.setPosition(myState.x, myState.y, myState.angle);
+        this.lantern.setPosition(myState.x, myState.y);
+      }
+      
+      // Add initial snapshot
+      this.snapshotInterpolation.addSnapshot(state.snapshot);
+      
+      // Start time sync
+      this.startTimeSync();
     });
     
     this.socket.on('gameState', (snapshot: GameSnapshot) => {
       this.handleGameState(snapshot);
+    });
+    
+    this.socket.on('pong', (serverTime: number, clientTime: number) => {
+      this.snapshotInterpolation.updateTimeSync(serverTime, clientTime);
     });
     
     this.socket.on('playerJoined', (playerId: string) => {
@@ -143,56 +220,106 @@ export class GameScene extends Phaser.Scene {
     });
   }
 
-  private handleGameState(snapshot: GameSnapshot): void {
-    // Update other players
-    for (const [id, playerState] of Object.entries(snapshot.players)) {
-      if (id === this.playerId) {
-        // Could add server reconciliation here later
-        continue;
+  private startTimeSync(): void {
+    // Initial sync
+    this.socket.emit('ping', Date.now());
+    
+    // Periodic sync
+    this.timeSyncInterval = window.setInterval(() => {
+      if (this.socket.connected) {
+        this.socket.emit('ping', Date.now());
       }
-      this.updateOtherPlayer(id, playerState);
+    }, GAME_CONFIG.NETWORK.TIME_SYNC_INTERVAL);
+  }
+
+  private handleGameState(snapshot: GameSnapshot): void {
+    // Add snapshot to interpolation buffer
+    this.snapshotInterpolation.addSnapshot(snapshot);
+    
+    // Reconcile local player with server state
+    if (this.playerId) {
+      const myServerState = snapshot.players[this.playerId];
+      if (myServerState) {
+        this.clientPrediction.reconcile(myServerState);
+      }
+    }
+  }
+
+  private updateOtherPlayers(): void {
+    // Get interpolated states for all other players
+    const interpolatedPlayers = this.snapshotInterpolation.getInterpolatedPlayers(
+      this.playerId || undefined
+    );
+    
+    // Update existing and create new player visuals
+    for (const [id, playerState] of interpolatedPlayers) {
+      this.updateOtherPlayerVisual(id, playerState);
     }
     
-    // Remove disconnected players
+    // Remove players that are no longer in the interpolated state
     for (const id of this.otherPlayers.keys()) {
-      if (!snapshot.players[id]) {
+      if (!interpolatedPlayers.has(id)) {
         this.removeOtherPlayer(id);
       }
     }
   }
 
-  private updateOtherPlayer(id: string, state: PlayerState): void {
-    let playerContainer = this.otherPlayers.get(id);
+  private updateOtherPlayerVisual(id: string, state: InterpolatedPlayer): void {
+    let visual = this.otherPlayers.get(id);
     
-    if (!playerContainer) {
-      // Create new player representation
-      playerContainer = this.add.container(state.x, state.y);
+    if (!visual) {
+      // Create new player visual
+      const container = this.add.container(state.x, state.y);
       
-      const glow = this.add.arc(0, 0, GAME_CONFIG.PLAYER.RADIUS * 2, 0, 360, false, 0xff6666, 0.3);
-      const core = this.add.arc(0, 0, GAME_CONFIG.PLAYER.RADIUS, 0, 360, false, 0xffaaaa, 1);
+      const glow = this.add.arc(
+        0, 0, 
+        GAME_CONFIG.PLAYER.RADIUS * 2, 
+        0, 360, false, 
+        GAME_CONFIG.COLORS.OTHER_PLAYER_GLOW, 0.3
+      );
       
-      playerContainer.add([glow, core]);
-      this.otherPlayers.set(id, playerContainer);
+      const core = this.add.arc(
+        0, 0, 
+        GAME_CONFIG.PLAYER.RADIUS, 
+        0, 360, false, 
+        GAME_CONFIG.COLORS.OTHER_PLAYER_CORE, 1
+      );
+      
+      container.add([glow, core]);
+      
+      visual = { container, glow, core };
+      this.otherPlayers.set(id, visual);
     }
     
-    // Update position (later: use interpolation)
-    playerContainer.setPosition(state.x, state.y);
+    // Update position (now smoothly interpolated!)
+    visual.container.setPosition(state.x, state.y);
   }
 
   private removeOtherPlayer(id: string): void {
-    const playerContainer = this.otherPlayers.get(id);
-    if (playerContainer) {
-      playerContainer.destroy();
+    const visual = this.otherPlayers.get(id);
+    if (visual) {
+      visual.container.destroy();
       this.otherPlayers.delete(id);
     }
   }
 
   update(_time: number, delta: number): void {
-    this.handleMovement(delta);
+    if (!this.playerId) return;
+    
+    // Process local movement with client-side prediction
+    this.handleLocalMovement(delta);
+    
+    // Update other players with interpolation
+    this.updateOtherPlayers();
+    
+    // Send input to server
     this.sendInputToServer();
+    
+    // Update debug display
+    this.updateDebug();
   }
 
-  private handleMovement(delta: number): void {
+  private handleLocalMovement(delta: number): void {
     const pointer = this.input.activePointer;
     const camera = this.cameras.main;
     
@@ -203,56 +330,24 @@ export class GameScene extends Phaser.Scene {
     const mouseOffsetX = pointer.x - centerX;
     const mouseOffsetY = pointer.y - centerY;
     
-    // Calculate distance from center (for speed control)
-    const distance = Math.sqrt(mouseOffsetX * mouseOffsetX + mouseOffsetY * mouseOffsetY);
-    const maxDistance = Math.min(centerX, centerY);
+    // Normalize to -1 to 1 range
+    const normalizedX = mouseOffsetX / centerX;
+    const normalizedY = mouseOffsetY / centerY;
     
-    // Only move if mouse is far enough from center
-    if (distance > 10) {
-      // Calculate target angle from mouse position
-      this.targetAngle = Math.atan2(mouseOffsetY, mouseOffsetX);
-      
-      // Smoothly rotate towards target (limited turn speed for boat-like feel)
-      const angleDiff = Phaser.Math.Angle.Wrap(this.targetAngle - this.currentAngle);
-      const turnAmount = GAME_CONFIG.PLAYER.TURN_SPEED * (delta / 1000);
-      
-      if (Math.abs(angleDiff) < turnAmount) {
-        this.currentAngle = this.targetAngle;
-      } else if (angleDiff > 0) {
-        this.currentAngle += turnAmount;
-      } else {
-        this.currentAngle -= turnAmount;
-      }
-      
-      this.currentAngle = Phaser.Math.Angle.Wrap(this.currentAngle);
-      
-      // Calculate speed based on mouse distance (normalized 0-1)
-      const speedFactor = Math.min(distance / maxDistance, 1);
-      const baseSpeed = GAME_CONFIG.PLAYER.BASE_SPEED * speedFactor;
-      
-      // Apply boost if active
-      this.currentSpeed = this.isBoosting 
-        ? baseSpeed * GAME_CONFIG.PLAYER.BOOST_MULTIPLIER 
-        : baseSpeed;
-    } else {
-      // Drift to stop when mouse is near center
-      this.currentSpeed *= 0.95;
-    }
+    // Get next sequence number
+    const sequence = this.clientPrediction.getNextSequence();
     
-    // Apply velocity
-    const velocityX = Math.cos(this.currentAngle) * this.currentSpeed;
-    const velocityY = Math.sin(this.currentAngle) * this.currentSpeed;
+    // Process input with prediction
+    const predicted = this.clientPrediction.processInput(
+      Phaser.Math.Clamp(normalizedX, -1, 1),
+      Phaser.Math.Clamp(normalizedY, -1, 1),
+      this.isBoosting,
+      delta,
+      sequence
+    );
     
-    // Update position
-    let newX = this.lantern.x + velocityX * (delta / 1000);
-    let newY = this.lantern.y + velocityY * (delta / 1000);
-    
-    // Clamp to world bounds
-    const radius = GAME_CONFIG.PLAYER.RADIUS;
-    newX = Phaser.Math.Clamp(newX, radius, GAME_CONFIG.WORLD_WIDTH - radius);
-    newY = Phaser.Math.Clamp(newY, radius, GAME_CONFIG.WORLD_HEIGHT - radius);
-    
-    this.lantern.setPosition(newX, newY);
+    // Update lantern position
+    this.lantern.setPosition(predicted.x, predicted.y);
     
     // Visual feedback for boosting
     if (this.isBoosting) {
@@ -278,6 +373,7 @@ export class GameScene extends Phaser.Scene {
     const normalizedY = (pointer.y - centerY) / centerY;
     
     const input: PlayerInput = {
+      sequence: this.clientPrediction.getNextSequence(),
       mouseX: Phaser.Math.Clamp(normalizedX, -1, 1),
       mouseY: Phaser.Math.Clamp(normalizedY, -1, 1),
       boosting: this.isBoosting,
@@ -286,5 +382,31 @@ export class GameScene extends Phaser.Scene {
     
     this.socket.emit('playerInput', input);
   }
-}
 
+  private updateDebug(): void {
+    if (!this.debugText || !this.showDebug) return;
+    
+    const rtt = this.snapshotInterpolation.getRTT();
+    const serverTime = this.snapshotInterpolation.getServerTime();
+    const renderTime = this.snapshotInterpolation.getRenderTime();
+    const pos = this.clientPrediction.getRawPosition();
+    
+    this.debugText.setText([
+      `Phase 2: Multiplayer Movement`,
+      `RTT: ${rtt}ms`,
+      `Interpolation Delay: ${GAME_CONFIG.NETWORK.INTERPOLATION_DELAY}ms`,
+      `Server Time: ${serverTime}`,
+      `Render Time: ${renderTime}`,
+      `Position: (${pos.x.toFixed(1)}, ${pos.y.toFixed(1)})`,
+      `Other Players: ${this.otherPlayers.size}`,
+      `[F3 to toggle debug]`,
+    ].join('\n'));
+  }
+
+  shutdown(): void {
+    if (this.timeSyncInterval) {
+      clearInterval(this.timeSyncInterval);
+    }
+    this.socket?.disconnect();
+  }
+}

@@ -6,7 +6,8 @@ import type {
   ClientToServerEvents, 
   PlayerInput, 
   PlayerState, 
-  GameSnapshot 
+  GameSnapshot,
+  InitialGameState,
 } from '../../shared/types';
 
 // Server configuration
@@ -39,6 +40,9 @@ interface ServerPlayerState extends PlayerState {
 // Store all connected players
 const players: Map<string, ServerPlayerState> = new Map();
 
+// Current game tick
+let currentTick = 0;
+
 // Initialize Express + Socket.io
 const app = express();
 const httpServer = createServer(app);
@@ -54,6 +58,7 @@ app.get('/', (_req, res) => {
   res.json({ 
     status: 'ok', 
     players: players.size,
+    tick: currentTick,
     uptime: process.uptime(),
   });
 });
@@ -69,9 +74,12 @@ io.on('connection', (socket: GameSocket) => {
     x: WORLD_WIDTH / 2 + (Math.random() - 0.5) * 200,
     y: WORLD_HEIGHT / 2 + (Math.random() - 0.5) * 200,
     angle: Math.random() * Math.PI * 2,
+    speed: 0,
     score: 0,
     bodySegments: [],
+    lastProcessedInput: 0,
     input: {
+      sequence: 0,
       mouseX: 0,
       mouseY: 0,
       boosting: false,
@@ -82,10 +90,21 @@ io.on('connection', (socket: GameSocket) => {
     currentSpeed: 0,
   };
   
+  // Set initial angle
+  playerState.currentAngle = playerState.angle;
+  playerState.targetAngle = playerState.angle;
+  
   players.set(playerId, playerState);
   
-  // Send acknowledgment with player ID
-  socket.emit('connected', playerId);
+  // Build initial game state to send to new player
+  const initialState: InitialGameState = {
+    playerId,
+    snapshot: buildGameSnapshot(),
+    serverTime: Date.now(),
+  };
+  
+  // Send acknowledgment with full initial state
+  socket.emit('connected', initialState);
   
   // Notify others of new player
   socket.broadcast.emit('playerJoined', playerId);
@@ -95,7 +114,14 @@ io.on('connection', (socket: GameSocket) => {
     const player = players.get(playerId);
     if (player) {
       player.input = input;
+      // Track the sequence number for reconciliation
+      player.lastProcessedInput = input.sequence;
     }
+  });
+  
+  // Handle time sync ping
+  socket.on('ping', (clientTime: number) => {
+    socket.emit('pong', Date.now(), clientTime);
   });
   
   // Handle disconnection
@@ -108,6 +134,7 @@ io.on('connection', (socket: GameSocket) => {
 
 // Game loop - updates physics and broadcasts state
 function gameLoop(): void {
+  currentTick++;
   const deltaMs = 1000 / TICK_RATE;
   const deltaS = deltaMs / 1000;
   
@@ -171,8 +198,9 @@ function updatePlayer(player: ServerPlayerState, deltaS: number): void {
   player.x = clamp(player.x, radius, WORLD_WIDTH - radius);
   player.y = clamp(player.y, radius, WORLD_HEIGHT - radius);
   
-  // Update visible angle
+  // Update visible angle and speed
   player.angle = player.currentAngle;
+  player.speed = player.currentSpeed;
 }
 
 function buildGameSnapshot(): GameSnapshot {
@@ -184,14 +212,17 @@ function buildGameSnapshot(): GameSnapshot {
       x: player.x,
       y: player.y,
       angle: player.angle,
+      speed: player.speed,
       score: player.score,
       bodySegments: player.bodySegments,
+      lastProcessedInput: player.lastProcessedInput,
     };
   }
   
   return {
     players: playersRecord,
-    timestamp: Date.now(),
+    serverTime: Date.now(),
+    tick: currentTick,
   };
 }
 
@@ -212,12 +243,12 @@ setInterval(gameLoop, 1000 / TICK_RATE);
 // Start server
 httpServer.listen(PORT, () => {
   console.log(`
-╔═══════════════════════════════════════════╗
-║     🏮 Tōrō Server - River of Souls 🏮    ║
-╠═══════════════════════════════════════════╣
-║  Server running on http://localhost:${PORT}  ║
-║  Tick rate: ${TICK_RATE} Hz                       ║
-╚═══════════════════════════════════════════╝
+╔═══════════════════════════════════════════════╗
+║     🏮 Tōrō Server - River of Souls 🏮        ║
+╠═══════════════════════════════════════════════╣
+║  Server running on http://localhost:${PORT}      ║
+║  Tick rate: ${TICK_RATE} Hz                           ║
+║  Phase 2: Multiplayer Movement Active         ║
+╚═══════════════════════════════════════════════╝
   `);
 });
-
