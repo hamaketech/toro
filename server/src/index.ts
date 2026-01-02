@@ -10,6 +10,9 @@ import type {
   InitialGameState,
   Hitodama,
   BodySegment,
+  DeathEvent,
+  DeathCause,
+  ScoreboardEntry,
 } from '../../shared/types';
 import { GAME_CONSTANTS } from '../../shared/types';
 
@@ -18,13 +21,11 @@ import { GAME_CONSTANTS } from '../../shared/types';
 // =============================================================================
 
 const PORT = 3001;
-const TICK_RATE = 20; // 20 updates per second
+const TICK_RATE = 20;
 
-// Game world configuration (must match client)
 const WORLD_WIDTH = 2000;
 const WORLD_HEIGHT = 2000;
 
-// Player configuration
 const PLAYER_CONFIG = {
   RADIUS: 20,
   BASE_SPEED: 200,
@@ -38,23 +39,23 @@ const PLAYER_CONFIG = {
 
 type GameSocket = Socket<ClientToServerEvents, ServerToClientEvents>;
 
-/** Position with timestamp for history tracking */
 interface PositionRecord {
   x: number;
   y: number;
   timestamp: number;
 }
 
-/** Player state stored on server (extends shared PlayerState) */
 interface ServerPlayerState extends PlayerState {
   input: PlayerInput;
   currentAngle: number;
   targetAngle: number;
   currentSpeed: number;
-  /** Position history for body segment following */
   positionHistory: PositionRecord[];
-  /** Accumulated boost drop (fractional segments) */
   boostDropAccumulator: number;
+  /** Socket reference for this player */
+  socket: GameSocket;
+  /** Time when player can respawn (0 if alive) */
+  respawnTime: number;
 }
 
 // =============================================================================
@@ -79,7 +80,6 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
   },
 });
 
-// Basic health check endpoint
 app.get('/', (_req, res) => {
   res.json({ 
     status: 'ok', 
@@ -123,7 +123,6 @@ function spawnInitialFood(): void {
 }
 
 function maintainFoodCount(): void {
-  // Spawn food if below max
   const currentCount = food.size;
   if (currentCount < GAME_CONSTANTS.MAX_FOOD_COUNT) {
     const toSpawn = Math.min(
@@ -137,19 +136,18 @@ function maintainFoodCount(): void {
 }
 
 function updateFoodMagnetism(deltaS: number): void {
-  // Apply magnetic pull from players to nearby food
   for (const player of players.values()) {
+    if (!player.alive) continue;
+    
     for (const item of food.values()) {
       const dx = player.x - item.x;
       const dy = player.y - item.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
       
       if (distance < GAME_CONSTANTS.FOOD_MAGNET_RADIUS && distance > 0) {
-        // Magnetic pull strength increases as food gets closer
         const pullFactor = 1 - (distance / GAME_CONSTANTS.FOOD_MAGNET_RADIUS);
         const pullStrength = GAME_CONSTANTS.FOOD_MAGNET_STRENGTH * pullFactor * pullFactor;
         
-        // Move food toward player
         const normalizedDx = dx / distance;
         const normalizedDy = dy / distance;
         
@@ -164,6 +162,8 @@ function checkFoodCollisions(): void {
   const collectionRadius = PLAYER_CONFIG.RADIUS + GAME_CONSTANTS.FOOD_RADIUS;
   
   for (const player of players.values()) {
+    if (!player.alive) continue;
+    
     const foodToRemove: string[] = [];
     
     for (const item of food.values()) {
@@ -172,17 +172,13 @@ function checkFoodCollisions(): void {
       const distance = Math.sqrt(dx * dx + dy * dy);
       
       if (distance < collectionRadius) {
-        // Collect food!
         player.score += item.value;
         player.targetLength += item.value * GAME_CONSTANTS.GROWTH_PER_FOOD;
         foodToRemove.push(item.id);
-        
-        // Notify clients
         io.emit('foodCollected', item.id, player.id);
       }
     }
     
-    // Remove collected food
     for (const id of foodToRemove) {
       food.delete(id);
     }
@@ -190,35 +186,244 @@ function checkFoodCollisions(): void {
 }
 
 // =============================================================================
+// COLLISION SYSTEM
+// =============================================================================
+
+function checkPlayerCollisions(): void {
+  const playersArray = Array.from(players.values()).filter(p => p.alive);
+  const deaths: Array<{ player: ServerPlayerState; cause: DeathCause; killer?: ServerPlayerState }> = [];
+  
+  for (const player of playersArray) {
+    // Skip if already marked for death this tick
+    if (deaths.some(d => d.player.id === player.id)) continue;
+    
+    // Check world border collision
+    if (isAtWorldBorder(player)) {
+      deaths.push({ player, cause: 'world_border' });
+      continue;
+    }
+    
+    // Check collision with other players
+    for (const other of playersArray) {
+      if (player.id === other.id) continue;
+      if (deaths.some(d => d.player.id === player.id)) break;
+      
+      // Head vs Head collision
+      const headDist = distance(player.x, player.y, other.x, other.y);
+      if (headDist < PLAYER_CONFIG.RADIUS * 2) {
+        if (GAME_CONSTANTS.HEAD_COLLISION_BOTH_DIE) {
+          // Both die
+          deaths.push({ player, cause: 'head_to_head', killer: other });
+          deaths.push({ player: other, cause: 'head_to_head', killer: player });
+        } else {
+          // Smaller one dies (based on body length)
+          const playerSize = player.bodySegments.length;
+          const otherSize = other.bodySegments.length;
+          
+          if (playerSize <= otherSize) {
+            deaths.push({ player, cause: 'head_to_head', killer: other });
+          }
+          if (otherSize <= playerSize) {
+            deaths.push({ player: other, cause: 'head_to_head', killer: player });
+          }
+        }
+        continue;
+      }
+      
+      // Head vs Body collision (my head hits their body)
+      for (const segment of other.bodySegments) {
+        const segDist = distance(player.x, player.y, segment.x, segment.y);
+        if (segDist < PLAYER_CONFIG.RADIUS + GAME_CONSTANTS.BODY_SEGMENT_HITBOX) {
+          deaths.push({ player, cause: 'head_collision', killer: other });
+          break;
+        }
+      }
+    }
+  }
+  
+  // Process all deaths
+  for (const { player, cause, killer } of deaths) {
+    killPlayer(player, cause, killer);
+  }
+}
+
+function isAtWorldBorder(player: ServerPlayerState): boolean {
+  const margin = PLAYER_CONFIG.RADIUS * 0.5; // Small margin before death
+  return (
+    player.x <= margin ||
+    player.x >= WORLD_WIDTH - margin ||
+    player.y <= margin ||
+    player.y >= WORLD_HEIGHT - margin
+  );
+}
+
+function distance(x1: number, y1: number, x2: number, y2: number): number {
+  const dx = x1 - x2;
+  const dy = y1 - y2;
+  return Math.sqrt(dx * dx + dy * dy);
+}
+
+// =============================================================================
+// DEATH & RESPAWN SYSTEM
+// =============================================================================
+
+function killPlayer(
+  player: ServerPlayerState, 
+  cause: DeathCause, 
+  killer?: ServerPlayerState
+): void {
+  if (!player.alive) return;
+  
+  console.log(`Player ${player.id} died: ${cause}${killer ? ` (killed by ${killer.id})` : ''}`);
+  
+  // Mark as dead
+  player.alive = false;
+  player.respawnTime = Date.now() + GAME_CONSTANTS.RESPAWN_DELAY;
+  
+  // Award kill to killer
+  if (killer && killer.id !== player.id) {
+    killer.kills++;
+  }
+  
+  // Drop all body segments as high-value food
+  let foodDropped = 0;
+  for (const segment of player.bodySegments) {
+    spawnFood(
+      segment.x + (Math.random() - 0.5) * 30,
+      segment.y + (Math.random() - 0.5) * 30,
+      GAME_CONSTANTS.DEATH_DROP_VALUE
+    );
+    foodDropped++;
+  }
+  
+  // Also drop some food at the head position
+  const headDrops = Math.min(5, Math.floor(player.score / 10) + 1);
+  for (let i = 0; i < headDrops; i++) {
+    const angle = (i / headDrops) * Math.PI * 2;
+    const dist = 20 + Math.random() * 30;
+    spawnFood(
+      player.x + Math.cos(angle) * dist,
+      player.y + Math.sin(angle) * dist,
+      GAME_CONSTANTS.DEATH_DROP_VALUE
+    );
+    foodDropped++;
+  }
+  
+  // Clear body segments
+  player.bodySegments = [];
+  player.targetLength = 0;
+  player.positionHistory = [];
+  
+  // Emit death event
+  const deathEvent: DeathEvent = {
+    playerId: player.id,
+    cause,
+    killerId: killer?.id,
+    x: player.x,
+    y: player.y,
+    score: player.score,
+    foodDropped,
+  };
+  
+  io.emit('playerDied', deathEvent);
+}
+
+function respawnPlayer(player: ServerPlayerState): void {
+  console.log(`Player ${player.id} respawning`);
+  
+  // Reset position to random location
+  player.x = WORLD_WIDTH / 2 + (Math.random() - 0.5) * 600;
+  player.y = WORLD_HEIGHT / 2 + (Math.random() - 0.5) * 600;
+  player.angle = Math.random() * Math.PI * 2;
+  player.currentAngle = player.angle;
+  player.targetAngle = player.angle;
+  
+  // Reset state
+  player.alive = true;
+  player.score = 0;
+  player.targetLength = GAME_CONSTANTS.STARTING_BODY_LENGTH;
+  player.bodySegments = [];
+  player.respawnTime = 0;
+  player.currentSpeed = 0;
+  player.boostDropAccumulator = 0;
+  
+  // Initialize position history
+  player.positionHistory = [{ x: player.x, y: player.y, timestamp: Date.now() }];
+  const historyLength = GAME_CONSTANTS.STARTING_BODY_LENGTH * GAME_CONSTANTS.BODY_SEGMENT_SPACING * 2;
+  for (let i = 0; i < historyLength; i++) {
+    player.positionHistory.push({
+      x: player.x - Math.cos(player.angle) * i * 0.5,
+      y: player.y - Math.sin(player.angle) * i * 0.5,
+      timestamp: Date.now() - i,
+    });
+  }
+  
+  io.emit('playerRespawned', player.id);
+}
+
+function checkRespawns(): void {
+  const now = Date.now();
+  
+  for (const player of players.values()) {
+    if (!player.alive && player.respawnTime > 0 && now >= player.respawnTime) {
+      respawnPlayer(player);
+    }
+  }
+}
+
+// =============================================================================
+// SCOREBOARD
+// =============================================================================
+
+function buildScoreboard(): ScoreboardEntry[] {
+  const entries: ScoreboardEntry[] = [];
+  
+  for (const player of players.values()) {
+    entries.push({
+      id: player.id,
+      score: player.score,
+      kills: player.kills,
+      bodyLength: player.bodySegments.length,
+    });
+  }
+  
+  // Sort by score descending
+  entries.sort((a, b) => b.score - a.score);
+  
+  // Return top N
+  return entries.slice(0, GAME_CONSTANTS.SCOREBOARD_SIZE);
+}
+
+// =============================================================================
 // BODY SEGMENT SYSTEM
 // =============================================================================
 
 function updatePositionHistory(player: ServerPlayerState): void {
+  if (!player.alive) return;
+  
   const now = Date.now();
   
-  // Add current position to history
   player.positionHistory.unshift({
     x: player.x,
     y: player.y,
     timestamp: now,
   });
   
-  // Calculate how many history points we need
   const firstGap = GAME_CONSTANTS.FIRST_SEGMENT_GAP;
   const segmentSpacing = GAME_CONSTANTS.BODY_SEGMENT_SPACING;
   const historyResolution = GAME_CONSTANTS.POSITION_HISTORY_RESOLUTION;
   const maxSegments = Math.max(player.targetLength, player.bodySegments.length) + 5;
-  // Account for larger first segment gap
   const totalDistance = firstGap + (maxSegments - 1) * segmentSpacing;
   const maxHistoryLength = totalDistance * historyResolution;
   
-  // Trim old history
   while (player.positionHistory.length > maxHistoryLength) {
     player.positionHistory.pop();
   }
 }
 
 function calculateBodySegments(player: ServerPlayerState): BodySegment[] {
+  if (!player.alive) return [];
+  
   const segments: BodySegment[] = [];
   const firstGap = GAME_CONSTANTS.FIRST_SEGMENT_GAP;
   const segmentSpacing = GAME_CONSTANTS.BODY_SEGMENT_SPACING;
@@ -228,13 +433,11 @@ function calculateBodySegments(player: ServerPlayerState): BodySegment[] {
     return segments;
   }
   
-  // Calculate current body length (may be growing toward targetLength)
   const currentLength = Math.min(
-    player.bodySegments.length + 1, // Can grow by 1 per tick
+    player.bodySegments.length + 1,
     player.targetLength
   );
   
-  // Walk along the position history trail to place segments
   let distanceAccumulated = 0;
   let segmentIndex = 0;
   
@@ -248,12 +451,9 @@ function calculateBodySegments(player: ServerPlayerState): BodySegment[] {
     
     distanceAccumulated += segmentDistance;
     
-    // First segment has larger gap from head, rest use normal spacing
     const requiredSpacing = segmentIndex === 0 ? firstGap : segmentSpacing;
     
-    // Place a segment when we've accumulated enough distance
     while (distanceAccumulated >= requiredSpacing && segmentIndex < currentLength) {
-      // Interpolate position along this segment
       const overshoot = distanceAccumulated - requiredSpacing;
       const t = segmentDistance > 0 ? overshoot / segmentDistance : 0;
       
@@ -275,19 +475,17 @@ function calculateBodySegments(player: ServerPlayerState): BodySegment[] {
 // =============================================================================
 
 function handleBoostDrop(player: ServerPlayerState, deltaS: number): void {
+  if (!player.alive) return;
   if (!player.input.boosting || player.targetLength <= GAME_CONSTANTS.MIN_BODY_LENGTH) {
     return;
   }
   
-  // Accumulate drop rate
   player.boostDropAccumulator += GAME_CONSTANTS.BOOST_DROP_RATE * deltaS;
   
-  // Drop segments when accumulator reaches 1
   while (player.boostDropAccumulator >= 1 && player.targetLength > GAME_CONSTANTS.MIN_BODY_LENGTH) {
     player.boostDropAccumulator -= 1;
     player.targetLength--;
     
-    // Drop a pellet at the tail position
     const tailSegment = player.bodySegments[player.bodySegments.length - 1];
     if (tailSegment) {
       spawnFood(
@@ -303,7 +501,7 @@ function handleBoostDrop(player: ServerPlayerState, deltaS: number): void {
 // PLAYER MANAGEMENT
 // =============================================================================
 
-function createPlayer(playerId: string): ServerPlayerState {
+function createPlayer(playerId: string, socket: GameSocket): ServerPlayerState {
   const startX = WORLD_WIDTH / 2 + (Math.random() - 0.5) * 400;
   const startY = WORLD_HEIGHT / 2 + (Math.random() - 0.5) * 400;
   const startAngle = Math.random() * Math.PI * 2;
@@ -318,6 +516,8 @@ function createPlayer(playerId: string): ServerPlayerState {
     bodySegments: [],
     targetLength: GAME_CONSTANTS.STARTING_BODY_LENGTH,
     lastProcessedInput: 0,
+    alive: true,
+    kills: 0,
     input: {
       sequence: 0,
       mouseX: 0,
@@ -330,9 +530,10 @@ function createPlayer(playerId: string): ServerPlayerState {
     currentSpeed: 0,
     positionHistory: [{ x: startX, y: startY, timestamp: Date.now() }],
     boostDropAccumulator: 0,
+    socket,
+    respawnTime: 0,
   };
   
-  // Initialize position history with enough points for starting body
   const historyLength = GAME_CONSTANTS.STARTING_BODY_LENGTH * GAME_CONSTANTS.BODY_SEGMENT_SPACING * 2;
   for (let i = 0; i < historyLength; i++) {
     player.positionHistory.push({
@@ -353,11 +554,9 @@ io.on('connection', (socket: GameSocket) => {
   const playerId = socket.id;
   console.log(`Player connected: ${playerId}`);
   
-  // Create player
-  const playerState = createPlayer(playerId);
+  const playerState = createPlayer(playerId, socket);
   players.set(playerId, playerState);
   
-  // Build initial game state
   const initialState: InitialGameState = {
     playerId,
     snapshot: buildGameSnapshot(),
@@ -367,34 +566,32 @@ io.on('connection', (socket: GameSocket) => {
   socket.emit('connected', initialState);
   socket.broadcast.emit('playerJoined', playerId);
   
-  // Handle player input
   socket.on('playerInput', (input: PlayerInput) => {
     const player = players.get(playerId);
-    if (player) {
+    if (player && player.alive) {
       player.input = input;
       player.lastProcessedInput = input.sequence;
     }
   });
   
-  // Handle time sync ping
   socket.on('ping', (clientTime: number) => {
     socket.emit('pong', Date.now(), clientTime);
   });
   
-  // Handle disconnection
+  socket.on('requestRespawn', () => {
+    const player = players.get(playerId);
+    if (player && !player.alive && player.respawnTime === 0) {
+      // Allow manual respawn request
+      respawnPlayer(player);
+    }
+  });
+  
   socket.on('disconnect', () => {
     console.log(`Player disconnected: ${playerId}`);
     
-    // Drop all body segments as food on death/disconnect
     const player = players.get(playerId);
-    if (player) {
-      for (const segment of player.bodySegments) {
-        spawnFood(
-          segment.x + (Math.random() - 0.5) * 20,
-          segment.y + (Math.random() - 0.5) * 20,
-          GAME_CONSTANTS.DROPPED_PELLET_VALUE
-        );
-      }
+    if (player && player.alive) {
+      killPlayer(player, 'disconnect');
     }
     
     players.delete(playerId);
@@ -411,13 +608,21 @@ function gameLoop(): void {
   const deltaMs = 1000 / TICK_RATE;
   const deltaS = deltaMs / 1000;
   
-  // Update all players
+  // Check for respawns
+  checkRespawns();
+  
+  // Update all alive players
   for (const player of players.values()) {
-    updatePlayerMovement(player, deltaS);
-    updatePositionHistory(player);
-    player.bodySegments = calculateBodySegments(player);
-    handleBoostDrop(player, deltaS);
+    if (player.alive) {
+      updatePlayerMovement(player, deltaS);
+      updatePositionHistory(player);
+      player.bodySegments = calculateBodySegments(player);
+      handleBoostDrop(player, deltaS);
+    }
   }
+  
+  // Check collisions (can cause deaths)
+  checkPlayerCollisions();
   
   // Update food
   updateFoodMagnetism(deltaS);
@@ -430,16 +635,15 @@ function gameLoop(): void {
 }
 
 function updatePlayerMovement(player: ServerPlayerState, deltaS: number): void {
+  if (!player.alive) return;
+  
   const { input } = player;
   
-  // Calculate distance from center (for speed control)
   const distance = Math.sqrt(input.mouseX * input.mouseX + input.mouseY * input.mouseY);
   
   if (distance > 0.05) {
-    // Calculate target angle from normalized mouse position
     player.targetAngle = Math.atan2(input.mouseY, input.mouseX);
     
-    // Smoothly rotate towards target (limited turn speed)
     const angleDiff = wrapAngle(player.targetAngle - player.currentAngle);
     const turnAmount = PLAYER_CONFIG.TURN_SPEED * deltaS;
     
@@ -453,33 +657,28 @@ function updatePlayerMovement(player: ServerPlayerState, deltaS: number): void {
     
     player.currentAngle = wrapAngle(player.currentAngle);
     
-    // Calculate speed based on mouse distance
     const speedFactor = Math.min(distance, 1);
     const baseSpeed = PLAYER_CONFIG.BASE_SPEED * speedFactor;
     
-    // Apply boost if active
     player.currentSpeed = input.boosting 
       ? baseSpeed * PLAYER_CONFIG.BOOST_MULTIPLIER 
       : baseSpeed;
   } else {
-    // Drift to stop when mouse is near center
     player.currentSpeed *= 0.95;
   }
   
-  // Apply velocity
   const velocityX = Math.cos(player.currentAngle) * player.currentSpeed;
   const velocityY = Math.sin(player.currentAngle) * player.currentSpeed;
   
-  // Update position
   player.x += velocityX * deltaS;
   player.y += velocityY * deltaS;
   
-  // Clamp to world bounds
-  const radius = PLAYER_CONFIG.RADIUS;
-  player.x = clamp(player.x, radius, WORLD_WIDTH - radius);
-  player.y = clamp(player.y, radius, WORLD_HEIGHT - radius);
+  // Don't clamp - let them hit the border and die
+  // But prevent going outside the world entirely
+  const hardLimit = PLAYER_CONFIG.RADIUS * -0.5;
+  player.x = clamp(player.x, hardLimit, WORLD_WIDTH - hardLimit);
+  player.y = clamp(player.y, hardLimit, WORLD_HEIGHT - hardLimit);
   
-  // Update visible angle and speed
   player.angle = player.currentAngle;
   player.speed = player.currentSpeed;
 }
@@ -498,6 +697,8 @@ function buildGameSnapshot(): GameSnapshot {
       bodySegments: player.bodySegments,
       targetLength: player.targetLength,
       lastProcessedInput: player.lastProcessedInput,
+      alive: player.alive,
+      kills: player.kills,
     };
   }
   
@@ -506,6 +707,7 @@ function buildGameSnapshot(): GameSnapshot {
     food: {
       items: Array.from(food.values()),
     },
+    scoreboard: buildScoreboard(),
     serverTime: Date.now(),
     tick: currentTick,
   };
@@ -529,13 +731,10 @@ function clamp(value: number, min: number, max: number): number {
 // STARTUP
 // =============================================================================
 
-// Spawn initial food
 spawnInitialFood();
 
-// Start game loop
 setInterval(gameLoop, 1000 / TICK_RATE);
 
-// Start server
 httpServer.listen(PORT, '0.0.0.0', () => {
   console.log(`
 ╔═══════════════════════════════════════════════╗
@@ -543,7 +742,7 @@ httpServer.listen(PORT, '0.0.0.0', () => {
 ╠═══════════════════════════════════════════════╣
 ║  Server running on http://0.0.0.0:${PORT}        ║
 ║  Tick rate: ${TICK_RATE} Hz                           ║
-║  Phase 3: Snake Logic + Food Active           ║
+║  Phase 4: Combat & Collision Active           ║
 ╚═══════════════════════════════════════════════╝
   `);
 });

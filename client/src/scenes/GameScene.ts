@@ -10,6 +10,7 @@ import type {
   GameSnapshot, 
   InitialGameState,
   BodySegment,
+  DeathEvent,
 } from '@shared/types';
 
 type GameSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
@@ -39,6 +40,17 @@ interface FoodVisual {
   core: Phaser.GameObjects.Arc;
   /** Unique phase offset for animations */
   phaseOffset: number;
+}
+
+interface DeathParticle {
+  x: number;
+  y: number;
+  vx: number;
+  vy: number;
+  size: number;
+  alpha: number;
+  life: number;
+  color: number;
 }
 
 // =============================================================================
@@ -71,6 +83,7 @@ export class GameScene extends Phaser.Scene {
   
   // World bounds graphics
   private worldBounds!: Phaser.GameObjects.Graphics;
+  private worldBorderWarning!: Phaser.GameObjects.Graphics;
   
   // Debug display
   private debugText?: Phaser.GameObjects.Text;
@@ -78,6 +91,16 @@ export class GameScene extends Phaser.Scene {
   
   // Animation time
   private animTime = 0;
+  
+  // Death state
+  private isAlive = true;
+  private deathOverlay?: Phaser.GameObjects.Container;
+  private deathParticles: DeathParticle[] = [];
+  private deathParticleGraphics?: Phaser.GameObjects.Graphics;
+  
+  // Scoreboard UI
+  private scoreboardContainer?: Phaser.GameObjects.Container;
+  private scoreboardEntries: Phaser.GameObjects.Text[] = [];
 
   constructor() {
     super({ key: 'GameScene' });
@@ -89,6 +112,8 @@ export class GameScene extends Phaser.Scene {
     this.setupWorld();
     this.createPlayer();
     this.setupInput();
+    this.createScoreboard();
+    this.createDeathParticleSystem();
     this.connectToServer();
     this.setupDebug();
   }
@@ -101,6 +126,13 @@ export class GameScene extends Phaser.Scene {
     this.worldBounds = this.add.graphics();
     this.worldBounds.lineStyle(3, 0x334455, 0.8);
     this.worldBounds.strokeRect(0, 0, GAME_CONFIG.WORLD_WIDTH, GAME_CONFIG.WORLD_HEIGHT);
+    
+    // World border danger zone warning
+    this.worldBorderWarning = this.add.graphics();
+    this.worldBorderWarning.lineStyle(8, 0xff4444, 0.15);
+    this.worldBorderWarning.strokeRect(10, 10, GAME_CONFIG.WORLD_WIDTH - 20, GAME_CONFIG.WORLD_HEIGHT - 20);
+    this.worldBorderWarning.lineStyle(4, 0xff6666, 0.25);
+    this.worldBorderWarning.strokeRect(5, 5, GAME_CONFIG.WORLD_WIDTH - 10, GAME_CONFIG.WORLD_HEIGHT - 10);
     
     const gridGraphics = this.add.graphics();
     gridGraphics.lineStyle(1, 0x1a1a2e, 0.3);
@@ -151,7 +183,9 @@ export class GameScene extends Phaser.Scene {
 
   private setupInput(): void {
     this.input.keyboard?.on('keydown-SPACE', () => {
-      this.isBoosting = true;
+      if (this.isAlive) {
+        this.isBoosting = true;
+      }
     });
     
     this.input.keyboard?.on('keyup-SPACE', () => {
@@ -160,7 +194,12 @@ export class GameScene extends Phaser.Scene {
     
     this.input.on('pointerdown', (pointer: Phaser.Input.Pointer) => {
       if (pointer.leftButtonDown()) {
-        this.isBoosting = true;
+        if (this.isAlive) {
+          this.isBoosting = true;
+        } else {
+          // Click to respawn when dead
+          this.requestRespawn();
+        }
       }
     });
     
@@ -172,6 +211,13 @@ export class GameScene extends Phaser.Scene {
       this.showDebug = !this.showDebug;
       if (this.debugText) {
         this.debugText.setVisible(this.showDebug);
+      }
+    });
+    
+    // Press Enter or Space to respawn when dead
+    this.input.keyboard?.on('keydown-ENTER', () => {
+      if (!this.isAlive) {
+        this.requestRespawn();
       }
     });
   }
@@ -186,6 +232,275 @@ export class GameScene extends Phaser.Scene {
     this.debugText.setScrollFactor(0);
     this.debugText.setDepth(1000);
     this.debugText.setVisible(this.showDebug);
+  }
+
+  // ===========================================================================
+  // SCOREBOARD UI
+  // ===========================================================================
+
+  private createScoreboard(): void {
+    this.scoreboardContainer = this.add.container(0, 0);
+    this.scoreboardContainer.setScrollFactor(0);
+    this.scoreboardContainer.setDepth(900);
+    
+    // Background
+    const bg = this.add.graphics();
+    bg.fillStyle(0x000000, 0.6);
+    bg.fillRoundedRect(0, 0, 200, 180, 8);
+    bg.lineStyle(1, 0x44ffcc, 0.4);
+    bg.strokeRoundedRect(0, 0, 200, 180, 8);
+    this.scoreboardContainer.add(bg);
+    
+    // Title
+    const title = this.add.text(100, 12, '🏮 LEADERBOARD', {
+      fontSize: '14px',
+      fontStyle: 'bold',
+      color: '#ffcc66',
+    });
+    title.setOrigin(0.5, 0);
+    this.scoreboardContainer.add(title);
+    
+    // Create entry slots
+    for (let i = 0; i < 5; i++) {
+      const entry = this.add.text(15, 40 + i * 26, '', {
+        fontSize: '13px',
+        color: '#aaddff',
+      });
+      this.scoreboardEntries.push(entry);
+      this.scoreboardContainer.add(entry);
+    }
+    
+    this.positionScoreboard();
+  }
+
+  private positionScoreboard(): void {
+    if (this.scoreboardContainer) {
+      const padding = 15;
+      this.scoreboardContainer.setPosition(
+        this.cameras.main.width - 200 - padding,
+        padding
+      );
+    }
+  }
+
+  private updateScoreboard(): void {
+    const scoreboard = this.snapshotInterpolation.getScoreboard();
+    
+    for (let i = 0; i < this.scoreboardEntries.length; i++) {
+      const entry = this.scoreboardEntries[i];
+      const data = scoreboard[i];
+      
+      if (data) {
+        const rank = i + 1;
+        const isMe = data.id === this.playerId;
+        const displayId = data.id.substring(0, 6);
+        const medal = rank === 1 ? '👑' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : '  ';
+        
+        entry.setText(`${medal} ${rank}. ${displayId} - ${data.score} pts`);
+        entry.setColor(isMe ? '#ffcc66' : '#aaddff');
+        entry.setAlpha(1);
+      } else {
+        entry.setText('');
+      }
+    }
+  }
+
+  // ===========================================================================
+  // DEATH SYSTEM
+  // ===========================================================================
+
+  private createDeathParticleSystem(): void {
+    this.deathParticleGraphics = this.add.graphics();
+    this.deathParticleGraphics.setDepth(200);
+  }
+
+  private spawnDeathExplosion(x: number, y: number, foodCount: number): void {
+    const particleCount = Math.min(50, foodCount * 3 + 15);
+    
+    for (let i = 0; i < particleCount; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 100 + Math.random() * 300;
+      
+      this.deathParticles.push({
+        x,
+        y,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed,
+        size: 4 + Math.random() * 12,
+        alpha: 1,
+        life: 1,
+        color: Math.random() > 0.5 ? 0xffcc66 : 0x44ffcc,
+      });
+    }
+  }
+
+  private updateDeathParticles(delta: number): void {
+    if (!this.deathParticleGraphics) return;
+    
+    const deltaS = delta / 1000;
+    this.deathParticleGraphics.clear();
+    
+    for (let i = this.deathParticles.length - 1; i >= 0; i--) {
+      const p = this.deathParticles[i];
+      
+      // Update position
+      p.x += p.vx * deltaS;
+      p.y += p.vy * deltaS;
+      
+      // Apply friction
+      p.vx *= 0.96;
+      p.vy *= 0.96;
+      
+      // Decay
+      p.life -= deltaS * 0.8;
+      p.alpha = p.life;
+      p.size *= 0.995;
+      
+      // Remove dead particles
+      if (p.life <= 0 || p.size < 1) {
+        this.deathParticles.splice(i, 1);
+        continue;
+      }
+      
+      // Draw
+      this.deathParticleGraphics.fillStyle(p.color, p.alpha * 0.6);
+      this.deathParticleGraphics.fillCircle(p.x, p.y, p.size * 1.5);
+      this.deathParticleGraphics.fillStyle(p.color, p.alpha);
+      this.deathParticleGraphics.fillCircle(p.x, p.y, p.size);
+    }
+  }
+
+  private showDeathOverlay(event: DeathEvent): void {
+    this.isAlive = false;
+    
+    // Hide local player
+    this.lantern.setVisible(false);
+    this.clearLocalBodySegments();
+    
+    // Create death overlay
+    this.deathOverlay = this.add.container(0, 0);
+    this.deathOverlay.setScrollFactor(0);
+    this.deathOverlay.setDepth(1000);
+    
+    // Darken background
+    const dimmer = this.add.rectangle(
+      this.cameras.main.width / 2,
+      this.cameras.main.height / 2,
+      this.cameras.main.width,
+      this.cameras.main.height,
+      0x000000,
+      0.7
+    );
+    this.deathOverlay.add(dimmer);
+    
+    // Death message container
+    const msgY = this.cameras.main.height / 2 - 50;
+    
+    // "YOU DIED" text
+    const deathText = this.add.text(
+      this.cameras.main.width / 2,
+      msgY - 40,
+      '💀 YOU DIED 💀',
+      {
+        fontSize: '48px',
+        fontStyle: 'bold',
+        color: '#ff6666',
+      }
+    );
+    deathText.setOrigin(0.5);
+    this.deathOverlay.add(deathText);
+    
+    // Cause of death
+    const causeText = this.getCauseText(event);
+    const causeLabel = this.add.text(
+      this.cameras.main.width / 2,
+      msgY + 20,
+      causeText,
+      {
+        fontSize: '20px',
+        color: '#ffaaaa',
+      }
+    );
+    causeLabel.setOrigin(0.5);
+    this.deathOverlay.add(causeLabel);
+    
+    // Score
+    const scoreLabel = this.add.text(
+      this.cameras.main.width / 2,
+      msgY + 60,
+      `Final Score: ${event.score}`,
+      {
+        fontSize: '24px',
+        color: '#ffcc66',
+      }
+    );
+    scoreLabel.setOrigin(0.5);
+    this.deathOverlay.add(scoreLabel);
+    
+    // Respawn hint
+    const hintLabel = this.add.text(
+      this.cameras.main.width / 2,
+      msgY + 120,
+      'Click or Press ENTER to respawn',
+      {
+        fontSize: '16px',
+        color: '#88ffcc',
+      }
+    );
+    hintLabel.setOrigin(0.5);
+    this.deathOverlay.add(hintLabel);
+    
+    // Animate hint
+    this.tweens.add({
+      targets: hintLabel,
+      alpha: { from: 1, to: 0.4 },
+      duration: 800,
+      yoyo: true,
+      repeat: -1,
+    });
+  }
+
+  private getCauseText(event: DeathEvent): string {
+    switch (event.cause) {
+      case 'head_collision':
+        return event.killerId 
+          ? `Crashed into ${event.killerId.substring(0, 6)}'s procession`
+          : 'Crashed into another player';
+      case 'head_to_head':
+        return event.killerId 
+          ? `Head-on collision with ${event.killerId.substring(0, 6)}`
+          : 'Head-on collision';
+      case 'world_border':
+        return 'Touched the void beyond the world';
+      case 'disconnect':
+        return 'Lost connection';
+      default:
+        return 'Unknown cause';
+    }
+  }
+
+  private hideDeathOverlay(): void {
+    if (this.deathOverlay) {
+      this.deathOverlay.destroy();
+      this.deathOverlay = undefined;
+    }
+    
+    this.isAlive = true;
+    this.lantern.setVisible(true);
+  }
+
+  private requestRespawn(): void {
+    if (!this.isAlive && this.socket.connected) {
+      this.socket.emit('requestRespawn');
+    }
+  }
+
+  private clearLocalBodySegments(): void {
+    for (const seg of this.localBodySegments) {
+      seg.glow.destroy();
+      seg.core.destroy();
+    }
+    this.localBodySegments = [];
   }
 
   // ===========================================================================
@@ -205,6 +520,8 @@ export class GameScene extends Phaser.Scene {
       if (myState) {
         this.clientPrediction.setPosition(myState.x, myState.y, myState.angle);
         this.lantern.setPosition(myState.x, myState.y);
+        this.isAlive = myState.alive;
+        this.lantern.setVisible(this.isAlive);
       }
       
       this.snapshotInterpolation.addSnapshot(state.snapshot);
@@ -232,6 +549,33 @@ export class GameScene extends Phaser.Scene {
       // Could play collection sound/effect here
     });
     
+    this.socket.on('playerDied', (event: DeathEvent) => {
+      console.log('Player died:', event);
+      
+      // Spawn death explosion effect at location
+      this.spawnDeathExplosion(event.x, event.y, event.foodDropped);
+      
+      // If it's us, show death overlay
+      if (event.playerId === this.playerId) {
+        this.showDeathOverlay(event);
+      }
+    });
+    
+    this.socket.on('playerRespawned', (playerId: string) => {
+      console.log('Player respawned:', playerId);
+      
+      if (playerId === this.playerId) {
+        this.hideDeathOverlay();
+        
+        // Sync position from server
+        const latestState = this.snapshotInterpolation.getLatestPlayerState(playerId);
+        if (latestState) {
+          this.clientPrediction.setPosition(latestState.x, latestState.y, latestState.angle);
+          this.lantern.setPosition(latestState.x, latestState.y);
+        }
+      }
+    });
+    
     this.socket.on('connect_error', (error) => {
       console.warn('Connection error:', error.message);
     });
@@ -253,8 +597,19 @@ export class GameScene extends Phaser.Scene {
     if (this.playerId) {
       const myServerState = snapshot.players[this.playerId];
       if (myServerState) {
-        this.clientPrediction.reconcile(myServerState);
-        this.updateLocalBodySegments(myServerState.bodySegments);
+        // Check if we just became alive (server respawned us)
+        if (!this.isAlive && myServerState.alive) {
+          this.hideDeathOverlay();
+          this.clientPrediction.setPosition(myServerState.x, myServerState.y, myServerState.angle);
+          this.lantern.setPosition(myServerState.x, myServerState.y);
+        }
+        
+        this.isAlive = myServerState.alive;
+        
+        if (this.isAlive) {
+          this.clientPrediction.reconcile(myServerState);
+          this.updateLocalBodySegments(myServerState.bodySegments);
+        }
       }
     }
   }
@@ -422,7 +777,13 @@ export class GameScene extends Phaser.Scene {
     );
     
     for (const [id, playerState] of interpolatedPlayers) {
-      this.updateOtherPlayerVisual(id, playerState);
+      // Only render alive players
+      if (playerState.alive) {
+        this.updateOtherPlayerVisual(id, playerState);
+      } else {
+        // Remove dead players
+        this.removeOtherPlayer(id);
+      }
     }
     
     for (const id of this.otherPlayers.keys()) {
@@ -632,10 +993,18 @@ export class GameScene extends Phaser.Scene {
     
     this.animTime = time / 1000;
     
-    this.handleLocalMovement(delta);
+    // Always update these
     this.updateOtherPlayers();
     this.updateFood();
-    this.sendInputToServer();
+    this.updateDeathParticles(delta);
+    this.updateScoreboard();
+    
+    // Only handle local movement when alive
+    if (this.isAlive) {
+      this.handleLocalMovement(delta);
+      this.sendInputToServer();
+    }
+    
     this.updateDebug();
   }
 
@@ -674,10 +1043,29 @@ export class GameScene extends Phaser.Scene {
       this.lanternGlow.setFillStyle(GAME_CONFIG.COLORS.LANTERN_GLOW, 0.35);
       this.lanternGlow.setRadius(GAME_CONFIG.PLAYER.RADIUS * 2.2);
     }
+    
+    // Visual warning when near world border
+    const pos = predicted;
+    const margin = 100;
+    const nearBorder = 
+      pos.x < margin || 
+      pos.x > GAME_CONFIG.WORLD_WIDTH - margin ||
+      pos.y < margin || 
+      pos.y > GAME_CONFIG.WORLD_HEIGHT - margin;
+    
+    if (nearBorder) {
+      const warningPulse = 0.5 + Math.sin(this.animTime * 6) * 0.3;
+      this.lanternCore.setFillStyle(
+        this.lerpColor(GAME_CONFIG.COLORS.LANTERN_CORE, 0xff6666, warningPulse),
+        1
+      );
+    } else {
+      this.lanternCore.setFillStyle(GAME_CONFIG.COLORS.LANTERN_CORE, 1);
+    }
   }
 
   private sendInputToServer(): void {
-    if (!this.socket.connected) return;
+    if (!this.socket.connected || !this.isAlive) return;
     
     const pointer = this.input.activePointer;
     const camera = this.cameras.main;
@@ -707,12 +1095,14 @@ export class GameScene extends Phaser.Scene {
     const latestState = this.snapshotInterpolation.getLatestPlayerState(this.playerId || '');
     
     this.debugText.setText([
-      `Phase 3: Snake Logic + Food`,
+      `Phase 4: Combat & Collision`,
       `RTT: ${rtt}ms`,
       `Position: (${pos.x.toFixed(0)}, ${pos.y.toFixed(0)})`,
+      `Alive: ${this.isAlive}`,
       `Body Segments: ${this.localBodySegments.length}`,
       `Target Length: ${latestState?.targetLength ?? 0}`,
       `Score: ${latestState?.score ?? 0}`,
+      `Kills: ${latestState?.kills ?? 0}`,
       `Food Items: ${this.foodVisuals.size}`,
       `Other Players: ${this.otherPlayers.size}`,
       `[F3 to toggle debug]`,

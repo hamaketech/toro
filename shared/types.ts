@@ -24,6 +24,30 @@ export interface BodySegment {
   y: number;
 }
 
+/** Death cause types */
+export type DeathCause = 
+  | 'head_collision'      // Ran into another player's body
+  | 'head_to_head'        // Head-on collision with another player
+  | 'world_border'        // Hit the world boundary
+  | 'disconnect';         // Player disconnected
+
+/** Death event data */
+export interface DeathEvent {
+  /** ID of the player who died */
+  playerId: string;
+  /** What caused the death */
+  cause: DeathCause;
+  /** ID of the killer (if applicable) */
+  killerId?: string;
+  /** Position where the death occurred */
+  x: number;
+  y: number;
+  /** Score at time of death */
+  score: number;
+  /** Number of food items dropped */
+  foodDropped: number;
+}
+
 /** Player state sent from server to clients */
 export interface PlayerState {
   id: string;
@@ -38,6 +62,18 @@ export interface PlayerState {
   targetLength: number;
   /** Last processed input sequence (for reconciliation) */
   lastProcessedInput: number;
+  /** Whether the player is alive */
+  alive: boolean;
+  /** Number of kills */
+  kills: number;
+}
+
+/** Scoreboard entry */
+export interface ScoreboardEntry {
+  id: string;
+  score: number;
+  kills: number;
+  bodyLength: number;
 }
 
 // =============================================================================
@@ -69,6 +105,8 @@ export interface FoodState {
 export interface GameSnapshot {
   players: Record<string, PlayerState>;
   food: FoodState;
+  /** Top players for scoreboard */
+  scoreboard: ScoreboardEntry[];
   /** Server timestamp for interpolation */
   serverTime: number;
   /** Tick number for ordering */
@@ -100,6 +138,10 @@ export interface ServerToClientEvents {
   pong: (serverTime: number, clientTime: number) => void;
   /** Food collected notification (for sound/effects) */
   foodCollected: (foodId: string, playerId: string) => void;
+  /** Player death event */
+  playerDied: (event: DeathEvent) => void;
+  /** Player respawned */
+  playerRespawned: (playerId: string) => void;
 }
 
 export interface ClientToServerEvents {
@@ -107,6 +149,8 @@ export interface ClientToServerEvents {
   playerInput: (input: PlayerInput) => void;
   /** Time sync request */
   ping: (clientTime: number) => void;
+  /** Request respawn after death */
+  requestRespawn: () => void;
 }
 
 // =============================================================================
@@ -142,4 +186,14 @@ export const GAME_CONSTANTS = {
   FOOD_SPAWN_RATE: 3,
   /** Dropped pellet value (from boosting or death) */
   DROPPED_PELLET_VALUE: 1,
+  /** Death drop value multiplier (body segments worth more on death) */
+  DEATH_DROP_VALUE: 2,
+  /** Body segment hitbox radius for collision */
+  BODY_SEGMENT_HITBOX: 10,
+  /** Respawn delay in milliseconds */
+  RESPAWN_DELAY: 2000,
+  /** Head-to-head collision: if true, both die. If false, smaller dies */
+  HEAD_COLLISION_BOTH_DIE: false,
+  /** Number of players to show on scoreboard */
+  SCOREBOARD_SIZE: 5,
 } as const;

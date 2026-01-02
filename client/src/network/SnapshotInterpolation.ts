@@ -1,4 +1,4 @@
-import type { GameSnapshot, PlayerState, Hitodama, BodySegment } from '@shared/types';
+import type { GameSnapshot, PlayerState, Hitodama, BodySegment, ScoreboardEntry } from '@shared/types';
 import { GAME_CONFIG } from '../config';
 
 /**
@@ -13,6 +13,8 @@ export interface InterpolatedPlayer {
   score: number;
   targetLength: number;
   bodySegments: BodySegment[];
+  alive: boolean;
+  kills: number;
 }
 
 /**
@@ -84,6 +86,14 @@ export class SnapshotInterpolation {
    */
   getRTT(): number {
     return this.rtt;
+  }
+
+  /**
+   * Get the latest scoreboard
+   */
+  getScoreboard(): ScoreboardEntry[] {
+    if (this.snapshots.length === 0) return [];
+    return this.snapshots[this.snapshots.length - 1].scoreboard || [];
   }
 
   /**
@@ -243,6 +253,8 @@ export class SnapshotInterpolation {
       score: after.score,
       targetLength: after.targetLength,
       bodySegments: this.interpolateBodySegments(before.bodySegments, after.bodySegments, t),
+      alive: after.alive,
+      kills: after.kills,
     };
   }
 
@@ -287,6 +299,8 @@ export class SnapshotInterpolation {
       score: state.score,
       targetLength: state.targetLength,
       bodySegments: [...state.bodySegments],
+      alive: state.alive,
+      kills: state.kills,
     };
   }
 
