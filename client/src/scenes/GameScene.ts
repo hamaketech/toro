@@ -80,6 +80,14 @@ export class GameScene extends Phaser.Scene {
   
   // Input state
   private isBoosting = false;
+  private keyboardInput = { x: 0, y: 0, active: false };
+  private cursors?: Phaser.Types.Input.Keyboard.CursorKeys;
+  private wasdKeys?: {
+    W: Phaser.Input.Keyboard.Key;
+    A: Phaser.Input.Keyboard.Key;
+    S: Phaser.Input.Keyboard.Key;
+    D: Phaser.Input.Keyboard.Key;
+  };
   
   // World bounds graphics
   private worldBounds!: Phaser.GameObjects.Graphics;
@@ -182,6 +190,19 @@ export class GameScene extends Phaser.Scene {
   }
 
   private setupInput(): void {
+    // Setup cursor keys (arrow keys)
+    this.cursors = this.input.keyboard?.createCursorKeys();
+    
+    // Setup WASD keys
+    if (this.input.keyboard) {
+      this.wasdKeys = {
+        W: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.W),
+        A: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.A),
+        S: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.S),
+        D: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.D),
+      };
+    }
+    
     this.input.keyboard?.on('keydown-SPACE', () => {
       if (this.isAlive) {
         this.isBoosting = true;
@@ -189,6 +210,17 @@ export class GameScene extends Phaser.Scene {
     });
     
     this.input.keyboard?.on('keyup-SPACE', () => {
+      this.isBoosting = false;
+    });
+    
+    // Shift key also triggers boost
+    this.input.keyboard?.on('keydown-SHIFT', () => {
+      if (this.isAlive) {
+        this.isBoosting = true;
+      }
+    });
+    
+    this.input.keyboard?.on('keyup-SHIFT', () => {
       this.isBoosting = false;
     });
     
@@ -220,6 +252,40 @@ export class GameScene extends Phaser.Scene {
         this.requestRespawn();
       }
     });
+  }
+  
+  private updateKeyboardInput(): void {
+    let kx = 0;
+    let ky = 0;
+    
+    // Check arrow keys
+    if (this.cursors) {
+      if (this.cursors.left.isDown) kx -= 1;
+      if (this.cursors.right.isDown) kx += 1;
+      if (this.cursors.up.isDown) ky -= 1;
+      if (this.cursors.down.isDown) ky += 1;
+    }
+    
+    // Check WASD keys
+    if (this.wasdKeys) {
+      if (this.wasdKeys.A.isDown) kx -= 1;
+      if (this.wasdKeys.D.isDown) kx += 1;
+      if (this.wasdKeys.W.isDown) ky -= 1;
+      if (this.wasdKeys.S.isDown) ky += 1;
+    }
+    
+    // Normalize diagonal movement
+    const len = Math.sqrt(kx * kx + ky * ky);
+    if (len > 0) {
+      kx /= len;
+      ky /= len;
+    }
+    
+    this.keyboardInput = {
+      x: kx,
+      y: ky,
+      active: len > 0,
+    };
   }
 
   private setupDebug(): void {
@@ -1009,23 +1075,37 @@ export class GameScene extends Phaser.Scene {
   }
 
   private handleLocalMovement(delta: number): void {
-    const pointer = this.input.activePointer;
-    const camera = this.cameras.main;
+    // Update keyboard state
+    this.updateKeyboardInput();
     
-    const centerX = camera.width / 2;
-    const centerY = camera.height / 2;
+    // Get movement input (keyboard takes priority when active)
+    let inputX: number;
+    let inputY: number;
     
-    const mouseOffsetX = pointer.x - centerX;
-    const mouseOffsetY = pointer.y - centerY;
-    
-    const normalizedX = mouseOffsetX / centerX;
-    const normalizedY = mouseOffsetY / centerY;
+    if (this.keyboardInput.active) {
+      // Use keyboard input
+      inputX = this.keyboardInput.x;
+      inputY = this.keyboardInput.y;
+    } else {
+      // Use mouse input
+      const pointer = this.input.activePointer;
+      const camera = this.cameras.main;
+      
+      const centerX = camera.width / 2;
+      const centerY = camera.height / 2;
+      
+      const mouseOffsetX = pointer.x - centerX;
+      const mouseOffsetY = pointer.y - centerY;
+      
+      inputX = Phaser.Math.Clamp(mouseOffsetX / centerX, -1, 1);
+      inputY = Phaser.Math.Clamp(mouseOffsetY / centerY, -1, 1);
+    }
     
     const sequence = this.clientPrediction.getNextSequence();
     
     const predicted = this.clientPrediction.processInput(
-      Phaser.Math.Clamp(normalizedX, -1, 1),
-      Phaser.Math.Clamp(normalizedY, -1, 1),
+      inputX,
+      inputY,
       this.isBoosting,
       delta,
       sequence
@@ -1067,19 +1147,30 @@ export class GameScene extends Phaser.Scene {
   private sendInputToServer(): void {
     if (!this.socket.connected || !this.isAlive) return;
     
-    const pointer = this.input.activePointer;
-    const camera = this.cameras.main;
+    // Get movement input (keyboard takes priority when active)
+    let inputX: number;
+    let inputY: number;
     
-    const centerX = camera.width / 2;
-    const centerY = camera.height / 2;
-    
-    const normalizedX = (pointer.x - centerX) / centerX;
-    const normalizedY = (pointer.y - centerY) / centerY;
+    if (this.keyboardInput.active) {
+      // Use keyboard input
+      inputX = this.keyboardInput.x;
+      inputY = this.keyboardInput.y;
+    } else {
+      // Use mouse input
+      const pointer = this.input.activePointer;
+      const camera = this.cameras.main;
+      
+      const centerX = camera.width / 2;
+      const centerY = camera.height / 2;
+      
+      inputX = Phaser.Math.Clamp((pointer.x - centerX) / centerX, -1, 1);
+      inputY = Phaser.Math.Clamp((pointer.y - centerY) / centerY, -1, 1);
+    }
     
     const input: PlayerInput = {
       sequence: this.clientPrediction.getNextSequence(),
-      mouseX: Phaser.Math.Clamp(normalizedX, -1, 1),
-      mouseY: Phaser.Math.Clamp(normalizedY, -1, 1),
+      mouseX: inputX,
+      mouseY: inputY,
       boosting: this.isBoosting,
       timestamp: Date.now(),
     };
@@ -1093,11 +1184,13 @@ export class GameScene extends Phaser.Scene {
     const rtt = this.snapshotInterpolation.getRTT();
     const pos = this.clientPrediction.getRawPosition();
     const latestState = this.snapshotInterpolation.getLatestPlayerState(this.playerId || '');
+    const inputMode = this.keyboardInput.active ? 'Keyboard' : 'Mouse';
     
     this.debugText.setText([
       `Phase 4: Combat & Collision`,
       `RTT: ${rtt}ms`,
       `Position: (${pos.x.toFixed(0)}, ${pos.y.toFixed(0)})`,
+      `Input: ${inputMode}`,
       `Alive: ${this.isAlive}`,
       `Body Segments: ${this.localBodySegments.length}`,
       `Target Length: ${latestState?.targetLength ?? 0}`,
