@@ -125,6 +125,12 @@ export class GameScene extends Phaser.Scene {
   // Scoreboard UI
   private scoreboardContainer?: Phaser.GameObjects.Container;
   private scoreboardEntries: Phaser.GameObjects.Text[] = [];
+  
+  // Minimap
+  private minimapContainer?: Phaser.GameObjects.Container;
+  private minimapGraphics?: Phaser.GameObjects.Graphics;
+  private readonly MINIMAP_SIZE = 150;
+  private readonly MINIMAP_MARGIN = 15;
 
   constructor() {
     super({ key: 'GameScene' });
@@ -148,6 +154,7 @@ export class GameScene extends Phaser.Scene {
     this.createPlayer();
     this.setupInput();
     this.createScoreboard();
+    this.createMinimap();
     this.createDeathParticleSystem();
     this.connectToServer();
     this.setupDebug();
@@ -501,6 +508,95 @@ export class GameScene extends Phaser.Scene {
         entry.setText('');
       }
     }
+  }
+
+  // ===========================================================================
+  // MINIMAP
+  // ===========================================================================
+  
+  private createMinimap(): void {
+    const size = this.MINIMAP_SIZE;
+    const margin = this.MINIMAP_MARGIN;
+    
+    // Position in bottom-left
+    const x = margin;
+    const y = this.cameras.main.height - size - margin;
+    
+    this.minimapContainer = this.add.container(x, y);
+    this.minimapContainer.setScrollFactor(0);
+    this.minimapContainer.setDepth(900);
+    
+    // Background
+    const bg = this.add.graphics();
+    bg.fillStyle(0x000000, 0.7);
+    bg.fillRoundedRect(0, 0, size, size, 6);
+    bg.lineStyle(2, 0x44ffcc, 0.5);
+    bg.strokeRoundedRect(0, 0, size, size, 6);
+    this.minimapContainer.add(bg);
+    
+    // Graphics layer for dots
+    this.minimapGraphics = this.add.graphics();
+    this.minimapContainer.add(this.minimapGraphics);
+    
+    // Title
+    const title = this.add.text(size / 2, 8, 'MAP', {
+      fontSize: '10px',
+      color: '#44ffcc',
+      fontStyle: 'bold',
+    });
+    title.setOrigin(0.5, 0);
+    this.minimapContainer.add(title);
+  }
+  
+  private updateMinimap(): void {
+    if (!this.minimapGraphics || !this.playerId) return;
+    
+    const g = this.minimapGraphics;
+    g.clear();
+    
+    const size = this.MINIMAP_SIZE;
+    const padding = 15; // Padding inside minimap for dots
+    const mapArea = size - padding * 2;
+    const worldW = GAME_CONFIG.WORLD_WIDTH;
+    const worldH = GAME_CONFIG.WORLD_HEIGHT;
+    
+    // Helper to convert world coords to minimap coords
+    const toMinimap = (wx: number, wy: number) => ({
+      x: padding + (wx / worldW) * mapArea,
+      y: padding + (wy / worldH) * mapArea,
+    });
+    
+    // Draw food as small cyan dots
+    const foods = this.snapshotInterpolation.getInterpolatedFood();
+    g.fillStyle(0x44ffcc, 0.5);
+    foods.forEach((food) => {
+      const pos = toMinimap(food.x, food.y);
+      g.fillCircle(pos.x, pos.y, 1.5);
+    });
+    
+    // Draw other players as red dots
+    const players = this.snapshotInterpolation.getInterpolatedPlayers();
+    players.forEach((player, id) => {
+      if (id === this.playerId) return;
+      const pos = toMinimap(player.x, player.y);
+      g.fillStyle(0xff6666, 0.9);
+      g.fillCircle(pos.x, pos.y, 3);
+    });
+    
+    // Draw local player as golden dot (if alive)
+    if (this.isAlive && this.lantern) {
+      const pos = toMinimap(this.lantern.x, this.lantern.y);
+      // Outer glow
+      g.fillStyle(0xffcc66, 0.4);
+      g.fillCircle(pos.x, pos.y, 6);
+      // Inner dot
+      g.fillStyle(0xffcc66, 1);
+      g.fillCircle(pos.x, pos.y, 4);
+    }
+    
+    // Draw world border indicator
+    g.lineStyle(1, 0xff4444, 0.3);
+    g.strokeRect(padding, padding, mapArea, mapArea);
   }
 
   // ===========================================================================
@@ -1286,6 +1382,7 @@ export class GameScene extends Phaser.Scene {
     this.updateFood();
     this.updateDeathParticles(delta);
     this.updateScoreboard();
+    this.updateMinimap();
     
     if (this.isAlive) {
       this.handleLocalMovement(delta);
