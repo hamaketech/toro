@@ -2,8 +2,9 @@
 # Tōrō - Docker Compose for Local Development & Testing
 # ==============================================================================
 # Usage:
-#   docker-compose up --build     # Build and run
-#   docker-compose down           # Stop and remove
+#   docker-compose up --build                    # Single instance (no Redis)
+#   docker-compose --profile redis up --build   # With Redis for horizontal scaling
+#   docker-compose down                          # Stop and remove
 # ==============================================================================
 
 version: '3.8'
@@ -18,8 +19,13 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-      # Redis URL (uncomment when Redis is available)
-      # - REDIS_URL=redis://redis:6379
+      - CORS_ORIGIN=*
+      # Redis URL - only connects if redis service is running
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+        required: false
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/status"]
@@ -28,15 +34,22 @@ services:
       retries: 3
       start_period: 10s
 
-  # Uncomment to add Redis for multi-instance support (Phase 6.3)
-  # redis:
-  #   image: redis:7-alpine
-  #   ports:
-  #     - "6379:6379"
-  #   volumes:
-  #     - redis_data:/data
-  #   restart: unless-stopped
+  # Redis for horizontal scaling (optional)
+  redis:
+    image: redis:7-alpine
+    profiles:
+      - redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
-# volumes:
-#   redis_data:
+volumes:
+  redis_data:
 

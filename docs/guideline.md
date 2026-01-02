@@ -78,3 +78,41 @@
 **Phase 5: Juice & Polish**
 * Name selection screen before joining
 * Add Glow/Bloom shaders.
+
+**Phase 6: Infrastructure & Deployment** ✅
+*Focus: Preparing the application for containerized deployment with Redis support.*
+*See: `docs/RFC-006-phase6-infrastructure.md` for full details.*
+
+**1. Containerization (Docker)** ✅
+* `Dockerfile` - Multi-stage build with node:20-alpine
+* `.dockerignore` - Excludes node_modules, .git, docs
+* `docker-compose.yml` - Local testing with optional Redis
+* Build uses `esbuild` for fast TypeScript bundling
+
+**2. Network Logic Update (Sticky Session Bypass)** ✅
+* Client: `transports: ['websocket']` in socket connection
+* Server: Configurable CORS via `CORS_ORIGIN` env var
+* Client auto-detects production URL (same origin)
+
+**3. Redis Integration (Horizontal Scaling)** ✅
+* Dependencies: `redis`, `@socket.io/redis-adapter`
+* Server checks `REDIS_URL` env var on startup
+* Falls back to single-instance mode if Redis unavailable
+* Enables broadcasting across multiple server instances
+
+**4. Environment Variables**
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PORT` | 3001/3000 | Server port |
+| `NODE_ENV` | development | Environment |
+| `REDIS_URL` | (empty) | Redis connection for scaling |
+| `CORS_ORIGIN` | * | Allowed origins |
+
+**5. Deployment Commands**
+```bash
+npm run dev          # Development
+npm run build        # Build for production
+npm start            # Run production server
+npm run docker:up    # Docker (single instance)
+docker-compose --profile redis up --build  # With Redis
+```

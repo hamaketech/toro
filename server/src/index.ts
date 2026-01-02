@@ -28,7 +28,13 @@ const __dirname = dirname(__filename);
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const NODE_ENV = process.env.NODE_ENV || 'development';
+const REDIS_URL = process.env.REDIS_URL || '';
+const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
 const TICK_RATE = 20;
+
+// Room configuration
+const MAX_PLAYERS_PER_ROOM = parseInt(process.env.MAX_PLAYERS_PER_ROOM || '50', 10);
+const MIN_ROOMS = 1; // Always keep at least 1 room
 
 const WORLD_WIDTH = 6000;
 const WORLD_HEIGHT = 6000;
@@ -65,16 +71,198 @@ interface ServerPlayerState extends PlayerState {
   respawnTime: number;
   /** Whether player has officially joined (set name) */
   hasJoined: boolean;
+  /** Room this player belongs to */
+  roomId: string;
 }
 
 // =============================================================================
-// GAME STATE
+// GAME ROOM CLASS
 // =============================================================================
 
-const players: Map<string, ServerPlayerState> = new Map();
-const food: Map<string, Hitodama> = new Map();
-let currentTick = 0;
-let foodIdCounter = 0;
+class GameRoom {
+  readonly id: string;
+  readonly players: Map<string, ServerPlayerState> = new Map();
+  readonly food: Map<string, Hitodama> = new Map();
+  private currentTick = 0;
+  private foodIdCounter = 0;
+  private readonly io: Server<ClientToServerEvents, ServerToClientEvents>;
+  
+  constructor(id: string, io: Server<ClientToServerEvents, ServerToClientEvents>) {
+    this.id = id;
+    this.io = io;
+    this.spawnInitialFood();
+    console.log(`🏠 Room "${id}" created`);
+  }
+  
+  get playerCount(): number {
+    return this.players.size;
+  }
+  
+  get socketRoom(): string {
+    return `room:${this.id}`;
+  }
+  
+  // Broadcast to all players in this room
+  broadcast(event: string, data: unknown): void {
+    this.io.to(this.socketRoom).emit(event as keyof ServerToClientEvents, data as never);
+  }
+  
+  addPlayer(player: ServerPlayerState): void {
+    this.players.set(player.id, player);
+    player.socket.join(this.socketRoom);
+  }
+  
+  removePlayer(playerId: string): void {
+    const player = this.players.get(playerId);
+    if (player) {
+      player.socket.leave(this.socketRoom);
+      this.players.delete(playerId);
+    }
+  }
+  
+  getNextFoodId(): string {
+    return `${this.id}-food-${this.foodIdCounter++}`;
+  }
+  
+  incrementTick(): number {
+    return ++this.currentTick;
+  }
+  
+  getTick(): number {
+    return this.currentTick;
+  }
+  
+  private spawnInitialFood(): void {
+    const INITIAL_FOOD_COUNT = 60;
+    const CLUSTER_COUNT = 8;
+    const CLUSTER_SIZE = 12;
+    
+    // Scattered food
+    for (let i = 0; i < INITIAL_FOOD_COUNT; i++) {
+      const id = this.getNextFoodId();
+      this.food.set(id, {
+        id,
+        x: Math.random() * WORLD_WIDTH,
+        y: Math.random() * WORLD_HEIGHT,
+        value: 1,
+        radius: 8 + Math.random() * 4,
+      });
+    }
+    
+    // Clustered food
+    for (let c = 0; c < CLUSTER_COUNT; c++) {
+      const cx = 200 + Math.random() * (WORLD_WIDTH - 400);
+      const cy = 200 + Math.random() * (WORLD_HEIGHT - 400);
+      
+      for (let i = 0; i < CLUSTER_SIZE; i++) {
+        const id = this.getNextFoodId();
+        const angle = Math.random() * Math.PI * 2;
+        const dist = Math.random() * 150;
+        
+        this.food.set(id, {
+          id,
+          x: cx + Math.cos(angle) * dist,
+          y: cy + Math.sin(angle) * dist,
+          value: 1 + Math.floor(Math.random() * 2),
+          radius: 10 + Math.random() * 6,
+        });
+      }
+    }
+    
+    console.log(`  🍡 Spawned ${this.food.size} food items in room "${this.id}"`);
+  }
+  
+  isEmpty(): boolean {
+    return this.players.size === 0;
+  }
+  
+  isFull(): boolean {
+    return this.players.size >= MAX_PLAYERS_PER_ROOM;
+  }
+}
+
+// =============================================================================
+// ROOM MANAGER
+// =============================================================================
+
+class RoomManager {
+  private rooms: Map<string, GameRoom> = new Map();
+  private roomCounter = 0;
+  private readonly io: Server<ClientToServerEvents, ServerToClientEvents>;
+  
+  constructor(io: Server<ClientToServerEvents, ServerToClientEvents>) {
+    this.io = io;
+    // Create initial room
+    this.createRoom();
+  }
+  
+  private createRoom(): GameRoom {
+    const id = `room-${++this.roomCounter}`;
+    const room = new GameRoom(id, this.io);
+    this.rooms.set(id, room);
+    return room;
+  }
+  
+  // Find best room for a new player (least full room with space)
+  findAvailableRoom(): GameRoom {
+    let bestRoom: GameRoom | null = null;
+    let lowestCount = Infinity;
+    
+    for (const room of this.rooms.values()) {
+      if (!room.isFull() && room.playerCount < lowestCount) {
+        bestRoom = room;
+        lowestCount = room.playerCount;
+      }
+    }
+    
+    // If no room available, create a new one
+    if (!bestRoom) {
+      bestRoom = this.createRoom();
+    }
+    
+    return bestRoom;
+  }
+  
+  getRoom(id: string): GameRoom | undefined {
+    return this.rooms.get(id);
+  }
+  
+  getAllRooms(): GameRoom[] {
+    return Array.from(this.rooms.values());
+  }
+  
+  // Clean up empty rooms (keep at least MIN_ROOMS)
+  cleanupEmptyRooms(): void {
+    if (this.rooms.size <= MIN_ROOMS) return;
+    
+    for (const [id, room] of this.rooms.entries()) {
+      if (room.isEmpty() && this.rooms.size > MIN_ROOMS) {
+        this.rooms.delete(id);
+        console.log(`🗑️  Room "${id}" removed (empty)`);
+      }
+    }
+  }
+  
+  getStats(): { totalRooms: number; totalPlayers: number; rooms: { id: string; players: number }[] } {
+    const rooms = this.getAllRooms().map(r => ({
+      id: r.id,
+      players: r.playerCount,
+    }));
+    
+    return {
+      totalRooms: this.rooms.size,
+      totalPlayers: rooms.reduce((sum, r) => sum + r.players, 0),
+      rooms,
+    };
+  }
+}
+
+// =============================================================================
+// GLOBAL GAME STATE (now managed by RoomManager)
+// =============================================================================
+
+// These will be initialized after io is created
+let roomManager: RoomManager;
 
 // =============================================================================
 // EXPRESS + SOCKET.IO SETUP
@@ -82,12 +270,54 @@ let foodIdCounter = 0;
 
 const app = express();
 const httpServer = createServer(app);
+
+// Configure CORS - in production, restrict to specific origins
+const corsOrigins = CORS_ORIGIN === '*' 
+  ? '*' 
+  : CORS_ORIGIN.split(',').map(o => o.trim());
+
 const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
   cors: {
-    origin: '*',
+    origin: corsOrigins,
     methods: ['GET', 'POST'],
+    credentials: true,
   },
+  // Force WebSocket transport for better load balancer compatibility
+  transports: ['websocket', 'polling'],
+  // Allow WebSocket upgrade
+  allowUpgrades: true,
 });
+
+// =============================================================================
+// REDIS ADAPTER (Optional - for horizontal scaling)
+// =============================================================================
+
+async function setupRedisAdapter(): Promise<void> {
+  if (!REDIS_URL) {
+    console.log('⚠️  No REDIS_URL configured - running in single-instance mode');
+    return;
+  }
+
+  try {
+    // Dynamic import for Redis adapter (optional dependency)
+    const { createClient } = await import('redis');
+    const { createAdapter } = await import('@socket.io/redis-adapter');
+
+    const pubClient = createClient({ url: REDIS_URL });
+    const subClient = pubClient.duplicate();
+
+    await Promise.all([pubClient.connect(), subClient.connect()]);
+
+    io.adapter(createAdapter(pubClient, subClient));
+    console.log('✅ Redis adapter connected - horizontal scaling enabled');
+  } catch (error) {
+    console.error('❌ Redis adapter failed to connect:', error);
+    console.log('⚠️  Falling back to single-instance mode');
+  }
+}
+
+// Initialize Redis adapter if configured
+setupRedisAdapter();
 
 // =============================================================================
 // STATIC FILE SERVING (Production)
@@ -114,25 +344,26 @@ if (NODE_ENV === 'production') {
   console.log('📦 Production mode: Serving static files from client/dist');
 }
 
+// Initialize room manager
+roomManager = new RoomManager(io);
+
 // Health check / status endpoint
 app.get('/api/status', (_req, res) => {
+  const stats = roomManager.getStats();
   res.json({ 
     status: 'ok', 
-    players: players.size,
-    food: food.size,
-    tick: currentTick,
+    totalPlayers: stats.totalPlayers,
+    totalRooms: stats.totalRooms,
+    rooms: stats.rooms,
+    maxPlayersPerRoom: MAX_PLAYERS_PER_ROOM,
     uptime: process.uptime(),
     env: NODE_ENV,
   });
 });
 
 // =============================================================================
-// FOOD SYSTEM
+// FOOD SYSTEM (Room-aware)
 // =============================================================================
-
-function generateFoodId(): string {
-  return `food_${++foodIdCounter}`;
-}
 
 // Food spawning configuration
 const FOOD_CONFIG = {
@@ -150,10 +381,8 @@ const FOOD_CONFIG = {
   BURST_SIZE: 8,              // How many food in a burst
 };
 
-let tickCounter = 0;
-
-function spawnFood(x?: number, y?: number, value?: number): Hitodama {
-  const id = generateFoodId();
+function spawnFoodInRoom(room: GameRoom, x?: number, y?: number, value?: number): Hitodama {
+  const id = room.getNextFoodId();
   const padding = 50;
   
   // Determine if this is golden food (only for natural spawns)
@@ -168,11 +397,11 @@ function spawnFood(x?: number, y?: number, value?: number): Hitodama {
     radius: isGolden ? GAME_CONSTANTS.FOOD_RADIUS * 1.3 : GAME_CONSTANTS.FOOD_RADIUS,
   };
   
-  food.set(id, hitodama);
+  room.food.set(id, hitodama);
   return hitodama;
 }
 
-function findSpawnLocation(): { x: number; y: number } {
+function findSpawnLocationInRoom(room: GameRoom): { x: number; y: number } {
   const padding = 50;
   
   // Edge bias - sometimes spawn near edges to encourage exploration
@@ -208,7 +437,7 @@ function findSpawnLocation(): { x: number; y: number } {
     const y = padding + Math.random() * (WORLD_HEIGHT - padding * 2);
     
     let tooClose = false;
-    for (const player of players.values()) {
+    for (const player of room.players.values()) {
       if (!player.alive) continue;
       const dx = player.x - x;
       const dy = player.y - y;
@@ -230,7 +459,7 @@ function findSpawnLocation(): { x: number; y: number } {
   };
 }
 
-function spawnFoodCluster(centerX: number, centerY: number): void {
+function spawnFoodClusterInRoom(room: GameRoom, centerX: number, centerY: number): void {
   const clusterSize = FOOD_CONFIG.CLUSTER_SIZE_MIN + 
     Math.floor(Math.random() * (FOOD_CONFIG.CLUSTER_SIZE_MAX - FOOD_CONFIG.CLUSTER_SIZE_MIN + 1));
   
@@ -245,53 +474,27 @@ function spawnFoodCluster(centerX: number, centerY: number): void {
     const clampedX = Math.max(padding, Math.min(WORLD_WIDTH - padding, x));
     const clampedY = Math.max(padding, Math.min(WORLD_HEIGHT - padding, y));
     
-    spawnFood(clampedX, clampedY);
+    spawnFoodInRoom(room, clampedX, clampedY);
   }
 }
 
-function spawnInitialFood(): void {
-  const initialCount = Math.floor(GAME_CONSTANTS.MAX_FOOD_COUNT * 0.7);
-  
-  // Spawn some clusters and some individual food
-  const clusterCount = Math.floor(initialCount / 8);
-  let spawned = 0;
-  
-  // Spawn clusters first
-  for (let i = 0; i < clusterCount && spawned < initialCount; i++) {
-    const loc = findSpawnLocation();
-    spawnFoodCluster(loc.x, loc.y);
-    spawned += FOOD_CONFIG.CLUSTER_SIZE_MIN;
-  }
-  
-  // Fill rest with individual food
-  while (spawned < initialCount) {
-    const loc = findSpawnLocation();
-    spawnFood(loc.x, loc.y);
-    spawned++;
-  }
-  
-  console.log(`Spawned ${food.size} initial food items (with clusters)`);
-}
-
-function maintainFoodCount(): void {
-  tickCounter++;
-  const currentCount = food.size;
+function maintainFoodCountInRoom(room: GameRoom): void {
+  const currentCount = room.food.size;
   
   if (currentCount >= GAME_CONSTANTS.MAX_FOOD_COUNT) return;
   
   // Dynamic spawn rate based on player count
-  const activePlayers = [...players.values()].filter(p => p.alive).length;
+  const activePlayers = [...room.players.values()].filter(p => p.alive).length;
   const dynamicSpawnRate = GAME_CONSTANTS.FOOD_SPAWN_RATE + 
     Math.floor(activePlayers * FOOD_CONFIG.SPAWN_RATE_PER_PLAYER);
   
   // Food burst event - exciting moment where lots of food appears
   if (Math.random() < FOOD_CONFIG.BURST_CHANCE && currentCount < GAME_CONSTANTS.MAX_FOOD_COUNT * 0.8) {
-    const burstLoc = findSpawnLocation();
-    console.log(`Food burst at (${Math.round(burstLoc.x)}, ${Math.round(burstLoc.y)})!`);
+    const burstLoc = findSpawnLocationInRoom(room);
     for (let i = 0; i < FOOD_CONFIG.BURST_SIZE; i++) {
       const angle = Math.random() * Math.PI * 2;
       const dist = Math.random() * 120;
-      spawnFood(
+      spawnFoodInRoom(room,
         burstLoc.x + Math.cos(angle) * dist,
         burstLoc.y + Math.sin(angle) * dist
       );
@@ -305,17 +508,17 @@ function maintainFoodCount(): void {
   for (let i = 0; i < toSpawn; i++) {
     // Occasionally spawn a cluster instead of single food
     if (Math.random() < FOOD_CONFIG.CLUSTER_CHANCE && currentCount + 5 < GAME_CONSTANTS.MAX_FOOD_COUNT) {
-      const loc = findSpawnLocation();
-      spawnFoodCluster(loc.x, loc.y);
+      const loc = findSpawnLocationInRoom(room);
+      spawnFoodClusterInRoom(room, loc.x, loc.y);
     } else {
-      const loc = findSpawnLocation();
-      spawnFood(loc.x, loc.y);
+      const loc = findSpawnLocationInRoom(room);
+      spawnFoodInRoom(room, loc.x, loc.y);
     }
   }
 }
 
-function updateFoodMagnetism(deltaS: number): void {
-  for (const player of players.values()) {
+function updateFoodMagnetismInRoom(room: GameRoom, deltaS: number): void {
+  for (const player of room.players.values()) {
     if (!player.alive) continue;
     
     // Bigger players have stronger pull (1x base, up to 2.5x at 20+ segments)
@@ -323,7 +526,7 @@ function updateFoodMagnetism(deltaS: number): void {
     const sizePullMultiplier = 1 + Math.min(bodyCount * 0.075, 1.5);
     const magnetRadius = GAME_CONSTANTS.FOOD_MAGNET_RADIUS * (1 + Math.min(bodyCount * 0.02, 0.4));
     
-    for (const item of food.values()) {
+    for (const item of room.food.values()) {
       const dx = player.x - item.x;
       const dy = player.y - item.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
@@ -342,15 +545,15 @@ function updateFoodMagnetism(deltaS: number): void {
   }
 }
 
-function checkFoodCollisions(): void {
+function checkFoodCollisionsInRoom(room: GameRoom): void {
   const collectionRadius = PLAYER_CONFIG.RADIUS + GAME_CONSTANTS.FOOD_RADIUS;
   
-  for (const player of players.values()) {
+  for (const player of room.players.values()) {
     if (!player.alive) continue;
     
     const foodToRemove: string[] = [];
     
-    for (const item of food.values()) {
+    for (const item of room.food.values()) {
       const dx = player.x - item.x;
       const dy = player.y - item.y;
       const distance = Math.sqrt(dx * dx + dy * dy);
@@ -359,22 +562,23 @@ function checkFoodCollisions(): void {
         player.score += item.value;
         player.targetLength += item.value * GAME_CONSTANTS.GROWTH_PER_FOOD;
         foodToRemove.push(item.id);
-        io.emit('foodCollected', item.id, player.id);
+        // Emit only to players in this room
+        io.to(room.socketRoom).emit('foodCollected', item.id, player.id);
       }
     }
     
     for (const id of foodToRemove) {
-      food.delete(id);
+      room.food.delete(id);
     }
   }
 }
 
 // =============================================================================
-// COLLISION SYSTEM
+// COLLISION SYSTEM (Room-aware)
 // =============================================================================
 
-function checkPlayerCollisions(): void {
-  const playersArray = Array.from(players.values()).filter(p => p.alive);
+function checkPlayerCollisionsInRoom(room: GameRoom): void {
+  const playersArray = Array.from(room.players.values()).filter(p => p.alive);
   const deaths: Array<{ player: ServerPlayerState; cause: DeathCause; killer?: ServerPlayerState }> = [];
   
   for (const player of playersArray) {
@@ -427,7 +631,7 @@ function checkPlayerCollisions(): void {
   
   // Process all deaths
   for (const { player, cause, killer } of deaths) {
-    killPlayer(player, cause, killer);
+    killPlayerInRoom(room, player, cause, killer);
   }
 }
 
@@ -448,17 +652,18 @@ function distance(x1: number, y1: number, x2: number, y2: number): number {
 }
 
 // =============================================================================
-// DEATH & RESPAWN SYSTEM
+// DEATH & RESPAWN SYSTEM (Room-aware)
 // =============================================================================
 
-function killPlayer(
+function killPlayerInRoom(
+  room: GameRoom,
   player: ServerPlayerState, 
   cause: DeathCause, 
   killer?: ServerPlayerState
 ): void {
   if (!player.alive) return;
   
-  console.log(`Player ${player.name} (${player.id}) died: ${cause}${killer ? ` (killed by ${killer.name})` : ''}`);
+  console.log(`[${room.id}] Player ${player.name} (${player.id}) died: ${cause}${killer ? ` (killed by ${killer.name})` : ''}`);
   
   // Mark as dead
   player.alive = false;
@@ -472,7 +677,7 @@ function killPlayer(
   // Drop all body segments as high-value food
   let foodDropped = 0;
   for (const segment of player.bodySegments) {
-    spawnFood(
+    spawnFoodInRoom(room,
       segment.x + (Math.random() - 0.5) * 30,
       segment.y + (Math.random() - 0.5) * 30,
       GAME_CONSTANTS.DEATH_DROP_VALUE
@@ -485,7 +690,7 @@ function killPlayer(
   for (let i = 0; i < headDrops; i++) {
     const angle = (i / headDrops) * Math.PI * 2;
     const dist = 20 + Math.random() * 30;
-    spawnFood(
+    spawnFoodInRoom(room,
       player.x + Math.cos(angle) * dist,
       player.y + Math.sin(angle) * dist,
       GAME_CONSTANTS.DEATH_DROP_VALUE
@@ -498,7 +703,7 @@ function killPlayer(
   player.targetLength = 0;
   player.positionHistory = [];
   
-  // Emit death event
+  // Emit death event to room only
   const deathEvent: DeathEvent = {
     playerId: player.id,
     cause,
@@ -510,7 +715,7 @@ function killPlayer(
     foodDropped,
   };
   
-  io.emit('playerDied', deathEvent);
+  io.to(room.socketRoom).emit('playerDied', deathEvent);
 }
 
 function respawnPlayer(player: ServerPlayerState): void {
@@ -543,27 +748,28 @@ function respawnPlayer(player: ServerPlayerState): void {
     });
   }
   
-  io.emit('playerRespawned', player.id);
+  // Respawn event is now emitted by checkRespawnsInRoom
 }
 
-function checkRespawns(): void {
+function checkRespawnsInRoom(room: GameRoom): void {
   const now = Date.now();
   
-  for (const player of players.values()) {
+  for (const player of room.players.values()) {
     if (!player.alive && player.respawnTime > 0 && now >= player.respawnTime) {
       respawnPlayer(player);
+      io.to(room.socketRoom).emit('playerRespawned', player.id);
     }
   }
 }
 
 // =============================================================================
-// SCOREBOARD
+// SCOREBOARD (Room-aware)
 // =============================================================================
 
-function buildScoreboard(): ScoreboardEntry[] {
+function buildScoreboardForRoom(room: GameRoom): ScoreboardEntry[] {
   const entries: ScoreboardEntry[] = [];
   
-  for (const player of players.values()) {
+  for (const player of room.players.values()) {
     if (!player.hasJoined) continue; // Only show players who have joined
     entries.push({
       id: player.id,
@@ -658,10 +864,10 @@ function calculateBodySegments(player: ServerPlayerState): BodySegment[] {
 }
 
 // =============================================================================
-// BOOST DROP SYSTEM
+// BOOST DROP SYSTEM (Room-aware)
 // =============================================================================
 
-function handleBoostDrop(player: ServerPlayerState, deltaS: number): void {
+function handleBoostDropInRoom(room: GameRoom, player: ServerPlayerState, deltaS: number): void {
   if (!player.alive) return;
   if (!player.input.boosting || player.targetLength <= GAME_CONSTANTS.MIN_BODY_LENGTH) {
     return;
@@ -675,7 +881,7 @@ function handleBoostDrop(player: ServerPlayerState, deltaS: number): void {
     
     const tailSegment = player.bodySegments[player.bodySegments.length - 1];
     if (tailSegment) {
-      spawnFood(
+      spawnFoodInRoom(room,
         tailSegment.x + (Math.random() - 0.5) * 10,
         tailSegment.y + (Math.random() - 0.5) * 10,
         GAME_CONSTANTS.DROPPED_PELLET_VALUE
@@ -688,7 +894,7 @@ function handleBoostDrop(player: ServerPlayerState, deltaS: number): void {
 // PLAYER MANAGEMENT
 // =============================================================================
 
-function createPlayer(playerId: string, socket: GameSocket, name = 'Wandering Soul'): ServerPlayerState {
+function createPlayer(playerId: string, socket: GameSocket, roomId: string, name = 'Wandering Soul'): ServerPlayerState {
   const startX = WORLD_WIDTH / 2 + (Math.random() - 0.5) * 1500;
   const startY = WORLD_HEIGHT / 2 + (Math.random() - 0.5) * 1500;
   const startAngle = Math.random() * Math.PI * 2;
@@ -706,6 +912,7 @@ function createPlayer(playerId: string, socket: GameSocket, name = 'Wandering So
     score: 0,
     bodySegments: [],
     targetLength: GAME_CONSTANTS.STARTING_BODY_LENGTH,
+    roomId,
     lastProcessedInput: 0,
     alive: true,
     kills: 0,
@@ -746,13 +953,18 @@ io.on('connection', (socket: GameSocket) => {
   const playerId = socket.id;
   console.log(`Player connected: ${playerId}`);
   
-  // Create player but don't mark as joined yet
-  const playerState = createPlayer(playerId, socket);
-  players.set(playerId, playerState);
+  // Find an available room for this player
+  const room = roomManager.findAvailableRoom();
+  
+  // Create player in that room
+  const playerState = createPlayer(playerId, socket, room.id);
+  room.addPlayer(playerState);
+  
+  console.log(`  → Assigned to ${room.id} (${room.playerCount}/${MAX_PLAYERS_PER_ROOM} players)`);
   
   const initialState: InitialGameState = {
     playerId,
-    snapshot: buildGameSnapshot(),
+    snapshot: buildGameSnapshotForRoom(room),
     serverTime: Date.now(),
   };
   
@@ -760,17 +972,18 @@ io.on('connection', (socket: GameSocket) => {
   
   // Handle player joining with name
   socket.on('joinGame', (options: JoinOptions) => {
-    const player = players.get(playerId);
+    const player = room.players.get(playerId);
     if (player && !player.hasJoined) {
       player.name = (options.name || 'Wandering Soul').trim().substring(0, 16) || 'Wandering Soul';
       player.hasJoined = true;
-      console.log(`Player ${player.name} (${playerId}) joined the game`);
-      socket.broadcast.emit('playerJoined', playerId, player.name);
+      console.log(`[${room.id}] Player ${player.name} (${playerId}) joined the game`);
+      // Broadcast to same room only
+      socket.to(room.socketRoom).emit('playerJoined', playerId, player.name);
     }
   });
   
   socket.on('playerInput', (input: PlayerInput) => {
-    const player = players.get(playerId);
+    const player = room.players.get(playerId);
     if (player && player.alive && player.hasJoined) {
       player.input = input;
       player.lastProcessedInput = input.sequence;
@@ -782,59 +995,67 @@ io.on('connection', (socket: GameSocket) => {
   });
   
   socket.on('requestRespawn', () => {
-    const player = players.get(playerId);
+    const player = room.players.get(playerId);
     if (player && !player.alive && player.respawnTime === 0) {
       // Allow manual respawn request
       respawnPlayer(player);
+      io.to(room.socketRoom).emit('playerRespawned', player.id);
     }
   });
   
   socket.on('disconnect', () => {
-    const player = players.get(playerId);
-    console.log(`Player disconnected: ${player?.name || playerId}`);
+    const player = room.players.get(playerId);
+    console.log(`[${room.id}] Player disconnected: ${player?.name || playerId}`);
     
     if (player && player.alive && player.hasJoined) {
-      killPlayer(player, 'disconnect');
+      killPlayerInRoom(room, player, 'disconnect');
     }
     
-    players.delete(playerId);
-    io.emit('playerLeft', playerId);
+    room.removePlayer(playerId);
+    io.to(room.socketRoom).emit('playerLeft', playerId);
   });
 });
 
 // =============================================================================
-// GAME LOOP
+// GAME LOOP (Room-aware)
 // =============================================================================
 
 function gameLoop(): void {
-  currentTick++;
   const deltaMs = 1000 / TICK_RATE;
   const deltaS = deltaMs / 1000;
   
-  // Check for respawns
-  checkRespawns();
-  
-  // Update all alive players
-  for (const player of players.values()) {
-    if (player.alive) {
-      updatePlayerMovement(player, deltaS);
-      updatePositionHistory(player);
-      player.bodySegments = calculateBodySegments(player);
-      handleBoostDrop(player, deltaS);
+  // Process each room independently
+  for (const room of roomManager.getAllRooms()) {
+    room.incrementTick();
+    
+    // Check for respawns in this room
+    checkRespawnsInRoom(room);
+    
+    // Update all alive players in this room
+    for (const player of room.players.values()) {
+      if (player.alive) {
+        updatePlayerMovement(player, deltaS);
+        updatePositionHistory(player);
+        player.bodySegments = calculateBodySegments(player);
+        handleBoostDropInRoom(room, player, deltaS);
+      }
     }
+    
+    // Check collisions (can cause deaths)
+    checkPlayerCollisionsInRoom(room);
+    
+    // Update food
+    updateFoodMagnetismInRoom(room, deltaS);
+    checkFoodCollisionsInRoom(room);
+    maintainFoodCountInRoom(room);
+    
+    // Broadcast game state to this room only
+    const snapshot = buildGameSnapshotForRoom(room);
+    io.to(room.socketRoom).emit('gameState', snapshot);
   }
   
-  // Check collisions (can cause deaths)
-  checkPlayerCollisions();
-  
-  // Update food
-  updateFoodMagnetism(deltaS);
-  checkFoodCollisions();
-  maintainFoodCount();
-  
-  // Broadcast game state
-  const snapshot = buildGameSnapshot();
-  io.emit('gameState', snapshot);
+  // Periodically clean up empty rooms
+  roomManager.cleanupEmptyRooms();
 }
 
 function updatePlayerMovement(player: ServerPlayerState, deltaS: number): void {
@@ -888,10 +1109,10 @@ function updatePlayerMovement(player: ServerPlayerState, deltaS: number): void {
   player.speed = player.currentSpeed;
 }
 
-function buildGameSnapshot(): GameSnapshot {
+function buildGameSnapshotForRoom(room: GameRoom): GameSnapshot {
   const playersRecord: Record<string, PlayerState> = {};
   
-  for (const [id, player] of players) {
+  for (const [id, player] of room.players) {
     // Only include players who have officially joined
     if (!player.hasJoined) continue;
     
@@ -914,11 +1135,11 @@ function buildGameSnapshot(): GameSnapshot {
   return {
     players: playersRecord,
     food: {
-      items: Array.from(food.values()),
+      items: Array.from(room.food.values()),
     },
-    scoreboard: buildScoreboard(),
+    scoreboard: buildScoreboardForRoom(room),
     serverTime: Date.now(),
-    tick: currentTick,
+    tick: room.getTick(),
   };
 }
 
@@ -940,12 +1161,13 @@ function clamp(value: number, min: number, max: number): number {
 // STARTUP
 // =============================================================================
 
-spawnInitialFood();
-
+// Start game loop (rooms are created by roomManager)
 setInterval(gameLoop, 1000 / TICK_RATE);
 
 httpServer.listen(PORT, '0.0.0.0', () => {
   const portStr = PORT.toString().padEnd(4, ' ');
+  const redisStatus = REDIS_URL ? 'Enabled' : 'Disabled';
+  const maxPlayers = MAX_PLAYERS_PER_ROOM.toString().padEnd(3, ' ');
   console.log(`
 ╔═══════════════════════════════════════════════╗
 ║     🏮 Tōrō Server - River of Souls 🏮        ║
@@ -953,6 +1175,8 @@ httpServer.listen(PORT, '0.0.0.0', () => {
 ║  Server running on http://0.0.0.0:${portStr}       ║
 ║  Environment: ${NODE_ENV.padEnd(11, ' ')}                   ║
 ║  Tick rate: ${TICK_RATE} Hz                           ║
+║  Max players/room: ${maxPlayers}                      ║
+║  Redis: ${redisStatus.padEnd(8, ' ')}                           ║
 ╚═══════════════════════════════════════════════╝
   `);
 });
