@@ -124,6 +124,8 @@ export interface InitialGameState {
   playerId: string;
   snapshot: GameSnapshot;
   serverTime: number;
+  /** Room code for sharing with friends */
+  roomCode: string;
 }
 
 // =============================================================================
@@ -154,6 +156,8 @@ export interface ServerToClientEvents {
 export interface JoinOptions {
   /** Player display name */
   name: string;
+  /** Optional room code to join a specific room */
+  roomCode?: string;
 }
 
 export interface ClientToServerEvents {

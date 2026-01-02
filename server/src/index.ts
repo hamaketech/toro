@@ -185,25 +185,54 @@ class GameRoom {
 // ROOM MANAGER
 // =============================================================================
 
+// Words for generating friendly room codes
+const ROOM_CODE_WORDS = [
+  'FIRE', 'MOON', 'STAR', 'WAVE', 'WIND', 'RAIN', 'SOUL', 'GLOW',
+  'LAMP', 'MIST', 'DAWN', 'DUSK', 'ECHO', 'JADE', 'RUBY', 'GOLD',
+  'LAKE', 'PEAK', 'LEAF', 'FERN', 'ROSE', 'LILY', 'IRIS', 'SAGE'
+];
+
+function generateRoomCode(): string {
+  const word = ROOM_CODE_WORDS[Math.floor(Math.random() * ROOM_CODE_WORDS.length)];
+  const num = Math.floor(Math.random() * 100);
+  return `${word}-${num.toString().padStart(2, '0')}`;
+}
+
 class RoomManager {
   private rooms: Map<string, GameRoom> = new Map();
-  private roomCounter = 0;
   private readonly io: Server<ClientToServerEvents, ServerToClientEvents>;
   
   constructor(io: Server<ClientToServerEvents, ServerToClientEvents>) {
     this.io = io;
-    // Create initial room
+    // Create initial public room
     this.createRoom();
   }
   
-  private createRoom(): GameRoom {
-    const id = `room-${++this.roomCounter}`;
-    const room = new GameRoom(id, this.io);
-    this.rooms.set(id, room);
+  private createRoom(customCode?: string): GameRoom {
+    // Generate unique code if not provided
+    let code = customCode || generateRoomCode();
+    
+    // Ensure uniqueness
+    while (this.rooms.has(code)) {
+      code = generateRoomCode();
+    }
+    
+    const room = new GameRoom(code, this.io);
+    this.rooms.set(code, room);
     return room;
   }
   
-  // Find best room for a new player (least full room with space)
+  // Get or create a room by code (for joining specific rooms)
+  getOrCreateRoom(code: string): GameRoom {
+    const existing = this.rooms.get(code.toUpperCase());
+    if (existing) {
+      return existing;
+    }
+    // Create new room with this code
+    return this.createRoom(code.toUpperCase());
+  }
+  
+  // Find best public room for a new player (least full room with space)
   findAvailableRoom(): GameRoom {
     let bestRoom: GameRoom | null = null;
     let lowestCount = Infinity;
@@ -223,8 +252,8 @@ class RoomManager {
     return bestRoom;
   }
   
-  getRoom(id: string): GameRoom | undefined {
-    return this.rooms.get(id);
+  getRoom(code: string): GameRoom | undefined {
+    return this.rooms.get(code.toUpperCase());
   }
   
   getAllRooms(): GameRoom[] {
@@ -894,13 +923,13 @@ function handleBoostDropInRoom(room: GameRoom, player: ServerPlayerState, deltaS
 // PLAYER MANAGEMENT
 // =============================================================================
 
-function createPlayer(playerId: string, socket: GameSocket, roomId: string, name = 'Wandering Soul'): ServerPlayerState {
+function createPlayer(playerId: string, socket: GameSocket, roomId: string, name = 'Hitodama'): ServerPlayerState {
   const startX = WORLD_WIDTH / 2 + (Math.random() - 0.5) * 1500;
   const startY = WORLD_HEIGHT / 2 + (Math.random() - 0.5) * 1500;
   const startAngle = Math.random() * Math.PI * 2;
   
   // Sanitize and trim name
-  const sanitizedName = name.trim().substring(0, 16) || 'Wandering Soul';
+  const sanitizedName = name.trim().substring(0, 16) || 'Hitodama';
   
   const player: ServerPlayerState = {
     id: playerId,
@@ -953,8 +982,24 @@ io.on('connection', (socket: GameSocket) => {
   const playerId = socket.id;
   console.log(`Player connected: ${playerId}`);
   
-  // Find an available room for this player
-  const room = roomManager.findAvailableRoom();
+  // Check if client requested a specific room via query param
+  const requestedRoom = socket.handshake.query.room as string | undefined;
+  
+  let room: GameRoom;
+  if (requestedRoom && requestedRoom.length > 0) {
+    // Join or create the requested room
+    room = roomManager.getOrCreateRoom(requestedRoom);
+    console.log(`  → Requested room "${room.id}"`);
+  } else {
+    // Find an available public room
+    room = roomManager.findAvailableRoom();
+  }
+  
+  // Check if room is full
+  if (room.isFull()) {
+    console.log(`  ⚠️ Room ${room.id} is full, finding alternative...`);
+    room = roomManager.findAvailableRoom();
+  }
   
   // Create player in that room
   const playerState = createPlayer(playerId, socket, room.id);
@@ -966,6 +1011,7 @@ io.on('connection', (socket: GameSocket) => {
     playerId,
     snapshot: buildGameSnapshotForRoom(room),
     serverTime: Date.now(),
+    roomCode: room.id,
   };
   
   socket.emit('connected', initialState);
@@ -974,7 +1020,7 @@ io.on('connection', (socket: GameSocket) => {
   socket.on('joinGame', (options: JoinOptions) => {
     const player = room.players.get(playerId);
     if (player && !player.hasJoined) {
-      player.name = (options.name || 'Wandering Soul').trim().substring(0, 16) || 'Wandering Soul';
+      player.name = (options.name || 'Hitodama').trim().substring(0, 16) || 'Hitodama';
       player.hasJoined = true;
       console.log(`[${room.id}] Player ${player.name} (${playerId}) joined the game`);
       // Broadcast to same room only

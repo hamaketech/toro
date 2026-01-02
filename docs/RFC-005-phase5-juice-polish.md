@@ -55,7 +55,7 @@ this.tweens.add({
 - Styled to match game aesthetic (dark background, cyan border)
 - Focus effects with glow shadow
 - Enter key starts game
-- Placeholder: "Wandering Soul"
+- Placeholder: "Hitodama"
 
 ```typescript
 // Input styling
@@ -150,7 +150,7 @@ this.scene.start('GameScene', { playerName: name });
 
 // GameScene receives
 init(data: SceneData): void {
-  this.playerName = data?.playerName || 'Wandering Soul';
+  this.playerName = data?.playerName || 'Hitodama';
 }
 
 // Join on connect

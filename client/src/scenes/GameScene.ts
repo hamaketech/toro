@@ -19,6 +19,7 @@ type GameSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 /** Data passed from MainMenuScene */
 interface SceneData {
   playerName: string;
+  roomCode?: string;
 }
 
 // =============================================================================
@@ -70,7 +71,7 @@ interface DeathParticle {
 export class GameScene extends Phaser.Scene {
   private socket!: GameSocket;
   private playerId: string | null = null;
-  private playerName = 'Wandering Soul';
+  private playerName = 'Hitodama';
   
   // Network systems
   private snapshotInterpolation!: SnapshotInterpolation;
@@ -126,6 +127,10 @@ export class GameScene extends Phaser.Scene {
   private scoreboardContainer?: Phaser.GameObjects.Container;
   private scoreboardEntries: Phaser.GameObjects.Text[] = [];
   
+  // Room code
+  private roomCode = '';
+  private roomCodeUI?: Phaser.GameObjects.Container;
+  
   // Minimap
   private minimapContainer?: Phaser.GameObjects.Container;
   private minimapGraphics?: Phaser.GameObjects.Graphics;
@@ -137,7 +142,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   init(data: SceneData): void {
-    this.playerName = data?.playerName || 'Wandering Soul';
+    this.playerName = data?.playerName || 'Hitodama';
+    this.roomCode = data?.roomCode || '';
   }
 
   preload(): void {
@@ -511,6 +517,39 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ===========================================================================
+  // ROOM CODE UI (Simple display, no copy button)
+  // ===========================================================================
+  
+  private createRoomCodeUI(): void {
+    if (this.roomCodeUI) {
+      this.roomCodeUI.destroy();
+    }
+    
+    const padding = 15;
+    const x = padding;
+    const y = padding;
+    
+    this.roomCodeUI = this.add.container(x, y);
+    this.roomCodeUI.setScrollFactor(0);
+    this.roomCodeUI.setDepth(901);
+    
+    // Background
+    const bg = this.add.graphics();
+    bg.fillStyle(0x000000, 0.5);
+    bg.fillRoundedRect(0, 0, 120, 36, 6);
+    this.roomCodeUI.add(bg);
+    
+    // Room label + code on one line
+    const codeText = this.add.text(60, 18, `🎮 ${this.roomCode}`, {
+      fontSize: '13px',
+      color: '#88ffcc',
+      fontStyle: 'bold',
+    });
+    codeText.setOrigin(0.5, 0.5);
+    this.roomCodeUI.add(codeText);
+  }
+
+  // ===========================================================================
   // MINIMAP
   // ===========================================================================
   
@@ -796,13 +835,27 @@ export class GameScene extends Phaser.Scene {
   // ===========================================================================
 
   private connectToServer(): void {
+    // Use room code from scene data (if provided)
+    const requestedRoom = this.roomCode || null;
+    
     this.socket = io(GAME_CONFIG.SERVER_URL, {
       transports: ['websocket'],
+      query: requestedRoom ? { room: requestedRoom } : {},
     });
     
     this.socket.on('connected', (state: InitialGameState) => {
       console.log('Connected to server with ID:', state.playerId);
+      console.log('Room code:', state.roomCode);
       this.playerId = state.playerId;
+      this.roomCode = state.roomCode;
+      
+      // Update URL with room code (for sharing)
+      const newUrl = new URL(window.location.href);
+      newUrl.searchParams.set('room', state.roomCode);
+      window.history.replaceState({}, '', newUrl.toString());
+      
+      // Show room code in-game
+      this.createRoomCodeUI();
       
       const joinOptions: JoinOptions = {
         name: this.playerName,

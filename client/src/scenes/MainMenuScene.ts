@@ -7,6 +7,7 @@ import Phaser from 'phaser';
  */
 export class MainMenuScene extends Phaser.Scene {
   private nameInput!: HTMLInputElement;
+  private roomCodeInput!: HTMLInputElement;
   private playButton?: Phaser.GameObjects.Container;
   private floatingOrbs: Array<{
     x: number;
@@ -29,6 +30,7 @@ export class MainMenuScene extends Phaser.Scene {
     this.createFloatingOrbs();
     this.createTitle();
     this.createNameInput();
+    this.createRoomCodeInput();
     this.createPlayButton();
     this.createFooter();
   }
@@ -179,7 +181,7 @@ export class MainMenuScene extends Phaser.Scene {
     this.nameInput = document.createElement('input');
     this.nameInput.type = 'text';
     this.nameInput.maxLength = 16;
-    this.nameInput.placeholder = 'Wandering Soul';
+    this.nameInput.placeholder = 'Hitodama';
     this.nameInput.value = '';
     
     // Style the input
@@ -227,11 +229,83 @@ export class MainMenuScene extends Phaser.Scene {
       this.nameInput.focus();
     });
   }
+  
+  private createRoomCodeInput(): void {
+    const { width, height } = this.cameras.main;
+    const centerX = width / 2;
+    const inputY = height / 2 + 50;
+    
+    // Subtle label above input
+    const label = this.add.text(centerX, inputY - 12, 'Join a friend?', {
+      fontSize: '11px',
+      fontFamily: 'Georgia, serif',
+      color: '#667788',
+    });
+    label.setOrigin(0.5);
+    label.setDepth(10);
+    
+    // Create HTML input element
+    this.roomCodeInput = document.createElement('input');
+    this.roomCodeInput.type = 'text';
+    this.roomCodeInput.maxLength = 10;
+    this.roomCodeInput.placeholder = 'ROOM-00';
+    this.roomCodeInput.value = '';
+    
+    // Check URL for room code
+    const urlParams = new URLSearchParams(window.location.search);
+    const urlRoom = urlParams.get('room');
+    if (urlRoom) {
+      this.roomCodeInput.value = urlRoom;
+    }
+    
+    // Compact, elegant input style
+    Object.assign(this.roomCodeInput.style, {
+      position: 'absolute',
+      left: `${centerX - 60}px`,
+      top: `${inputY}px`,
+      width: '120px',
+      height: '32px',
+      padding: '0 10px',
+      fontSize: '13px',
+      fontFamily: 'monospace',
+      color: '#88ddbb',
+      backgroundColor: 'rgba(10, 20, 30, 0.5)',
+      border: '1px solid rgba(68, 255, 204, 0.2)',
+      borderRadius: '4px',
+      outline: 'none',
+      textAlign: 'center',
+      textTransform: 'uppercase',
+      letterSpacing: '1px',
+      transition: 'all 0.2s ease',
+    });
+    
+    // Focus/blur effects
+    this.roomCodeInput.addEventListener('focus', () => {
+      this.roomCodeInput.style.borderColor = 'rgba(68, 255, 204, 0.5)';
+      this.roomCodeInput.style.backgroundColor = 'rgba(10, 20, 30, 0.7)';
+      this.roomCodeInput.style.boxShadow = '0 0 10px rgba(68, 255, 204, 0.15)';
+    });
+    
+    this.roomCodeInput.addEventListener('blur', () => {
+      this.roomCodeInput.style.borderColor = 'rgba(68, 255, 204, 0.2)';
+      this.roomCodeInput.style.backgroundColor = 'rgba(10, 20, 30, 0.5)';
+      this.roomCodeInput.style.boxShadow = 'none';
+    });
+    
+    // Enter key to start game
+    this.roomCodeInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        this.startGame();
+      }
+    });
+    
+    document.body.appendChild(this.roomCodeInput);
+  }
 
   private createPlayButton(): void {
     const { width, height } = this.cameras.main;
     const centerX = width / 2;
-    const buttonY = height / 2 + 80;
+    const buttonY = height / 2 + 145;
     
     this.playButton = this.add.container(centerX, buttonY);
     this.playButton.setDepth(20);
@@ -316,7 +390,7 @@ export class MainMenuScene extends Phaser.Scene {
     
     // Version / Phase
     const version = this.add.text(width / 2, height - 50,
-      'Phase 5: Juice & Polish', {
+      'Developed by Hamake Technologies LTDA • 2026', {
       fontSize: '11px',
       fontFamily: 'Georgia, serif',
       color: '#445566',
@@ -326,17 +400,19 @@ export class MainMenuScene extends Phaser.Scene {
   }
 
   private startGame(): void {
-    // Get final name value
-    const name = this.nameInput.value.trim() || 'Wandering Soul';
+    // Get values
+    const name = this.nameInput.value.trim() || 'Hiro';
+    const roomCode = this.roomCodeInput.value.trim().toUpperCase();
     
-    // Clean up HTML input
+    // Clean up HTML inputs
     this.nameInput.remove();
+    this.roomCodeInput.remove();
     
-    // Transition to game scene
+    // Transition to game scene with room code
     this.cameras.main.fadeOut(500, 0, 0, 0);
     
     this.time.delayedCall(500, () => {
-      this.scene.start('GameScene', { playerName: name });
+      this.scene.start('GameScene', { playerName: name, roomCode: roomCode || undefined });
     });
   }
 
