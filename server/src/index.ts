@@ -28,12 +28,11 @@ const __dirname = dirname(__filename);
 
 const PORT = parseInt(process.env.PORT || '3001', 10);
 const NODE_ENV = process.env.NODE_ENV || 'development';
-const REDIS_URL = process.env.REDIS_URL || '';
 const CORS_ORIGIN = process.env.CORS_ORIGIN || '*';
-const TICK_RATE = 20;
+const TICK_RATE = 20; // 20 updates per second (50ms interval)
 
 // Room configuration
-const MAX_PLAYERS_PER_ROOM = parseInt(process.env.MAX_PLAYERS_PER_ROOM || '50', 10);
+const MAX_PLAYERS_PER_ROOM = parseInt(process.env.MAX_PLAYERS_PER_ROOM || '15', 10);
 const MIN_ROOMS = 1; // Always keep at least 1 room
 
 const WORLD_WIDTH = 6000;
@@ -76,6 +75,57 @@ interface ServerPlayerState extends PlayerState {
 }
 
 // =============================================================================
+// SPATIAL GRID (Performance optimization for collision detection)
+// =============================================================================
+
+const GRID_CELL_SIZE = 200; // pixels per cell
+
+class SpatialGrid<T extends { x: number; y: number; id: string }> {
+  private cells: Map<string, Set<T>> = new Map();
+  
+  clear(): void {
+    this.cells.clear();
+  }
+  
+  private getCellKey(x: number, y: number): string {
+    const cellX = Math.floor(x / GRID_CELL_SIZE);
+    const cellY = Math.floor(y / GRID_CELL_SIZE);
+    return `${cellX},${cellY}`;
+  }
+  
+  insert(item: T): void {
+    const key = this.getCellKey(item.x, item.y);
+    let cell = this.cells.get(key);
+    if (!cell) {
+      cell = new Set();
+      this.cells.set(key, cell);
+    }
+    cell.add(item);
+  }
+  
+  // Get all items within radius of a point
+  getNearby(x: number, y: number, radius: number): T[] {
+    const results: T[] = [];
+    const minCellX = Math.floor((x - radius) / GRID_CELL_SIZE);
+    const maxCellX = Math.floor((x + radius) / GRID_CELL_SIZE);
+    const minCellY = Math.floor((y - radius) / GRID_CELL_SIZE);
+    const maxCellY = Math.floor((y + radius) / GRID_CELL_SIZE);
+    
+    for (let cx = minCellX; cx <= maxCellX; cx++) {
+      for (let cy = minCellY; cy <= maxCellY; cy++) {
+        const cell = this.cells.get(`${cx},${cy}`);
+        if (cell) {
+          for (const item of cell) {
+            results.push(item);
+          }
+        }
+      }
+    }
+    return results;
+  }
+}
+
+// =============================================================================
 // GAME ROOM CLASS
 // =============================================================================
 
@@ -86,6 +136,10 @@ class GameRoom {
   private currentTick = 0;
   private foodIdCounter = 0;
   private readonly io: Server<ClientToServerEvents, ServerToClientEvents>;
+  
+  // Spatial grids for fast collision lookups
+  readonly playerGrid: SpatialGrid<ServerPlayerState> = new SpatialGrid();
+  readonly foodGrid: SpatialGrid<Hitodama> = new SpatialGrid();
   
   constructor(id: string, io: Server<ClientToServerEvents, ServerToClientEvents>) {
     this.id = id;
@@ -100,6 +154,22 @@ class GameRoom {
   
   get socketRoom(): string {
     return `room:${this.id}`;
+  }
+  
+  // Rebuild spatial grids (call once per tick)
+  rebuildGrids(): void {
+    this.playerGrid.clear();
+    this.foodGrid.clear();
+    
+    for (const player of this.players.values()) {
+      if (player.alive) {
+        this.playerGrid.insert(player);
+      }
+    }
+    
+    for (const item of this.food.values()) {
+      this.foodGrid.insert(item);
+    }
   }
   
   // Broadcast to all players in this room
@@ -318,35 +388,10 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
 });
 
 // =============================================================================
-// REDIS ADAPTER (Optional - for horizontal scaling)
+// PERFORMANCE MODE (Single Instance - Optimized)
 // =============================================================================
 
-async function setupRedisAdapter(): Promise<void> {
-  if (!REDIS_URL) {
-    console.log('⚠️  No REDIS_URL configured - running in single-instance mode');
-    return;
-  }
-
-  try {
-    // Dynamic import for Redis adapter (optional dependency)
-    const { createClient } = await import('redis');
-    const { createAdapter } = await import('@socket.io/redis-adapter');
-
-    const pubClient = createClient({ url: REDIS_URL });
-    const subClient = pubClient.duplicate();
-
-    await Promise.all([pubClient.connect(), subClient.connect()]);
-
-    io.adapter(createAdapter(pubClient, subClient));
-    console.log('✅ Redis adapter connected - horizontal scaling enabled');
-  } catch (error) {
-    console.error('❌ Redis adapter failed to connect:', error);
-    console.log('⚠️  Falling back to single-instance mode');
-  }
-}
-
-// Initialize Redis adapter if configured
-setupRedisAdapter();
+console.log('🚀 Running in single-instance optimized mode');
 
 // =============================================================================
 // STATIC FILE SERVING (Production)
@@ -555,12 +600,16 @@ function updateFoodMagnetismInRoom(room: GameRoom, deltaS: number): void {
     const sizePullMultiplier = 1 + Math.min(bodyCount * 0.075, 1.5);
     const magnetRadius = GAME_CONSTANTS.FOOD_MAGNET_RADIUS * (1 + Math.min(bodyCount * 0.02, 0.4));
     
-    for (const item of room.food.values()) {
+    // Use spatial grid for fast nearby food lookup
+    const nearbyFood = room.foodGrid.getNearby(player.x, player.y, magnetRadius);
+    
+    for (const item of nearbyFood) {
       const dx = player.x - item.x;
       const dy = player.y - item.y;
-      const distance = Math.sqrt(dx * dx + dy * dy);
+      const distSq = dx * dx + dy * dy;
       
-      if (distance < magnetRadius && distance > 0) {
+      if (distSq < magnetRadius * magnetRadius && distSq > 0) {
+        const distance = Math.sqrt(distSq);
         const pullFactor = 1 - (distance / magnetRadius);
         const pullStrength = GAME_CONSTANTS.FOOD_MAGNET_STRENGTH * pullFactor * pullFactor * sizePullMultiplier;
         
@@ -576,18 +625,22 @@ function updateFoodMagnetismInRoom(room: GameRoom, deltaS: number): void {
 
 function checkFoodCollisionsInRoom(room: GameRoom): void {
   const collectionRadius = PLAYER_CONFIG.RADIUS + GAME_CONSTANTS.FOOD_RADIUS;
+  const collectionRadiusSq = collectionRadius * collectionRadius;
   
   for (const player of room.players.values()) {
     if (!player.alive) continue;
     
     const foodToRemove: string[] = [];
     
-    for (const item of room.food.values()) {
+    // Use spatial grid for fast nearby food lookup
+    const nearbyFood = room.foodGrid.getNearby(player.x, player.y, collectionRadius);
+    
+    for (const item of nearbyFood) {
       const dx = player.x - item.x;
       const dy = player.y - item.y;
-      const distance = Math.sqrt(dx * dx + dy * dy);
+      const distSq = dx * dx + dy * dy;
       
-      if (distance < collectionRadius) {
+      if (distSq < collectionRadiusSq) {
         player.score += item.value;
         player.targetLength += item.value * GAME_CONSTANTS.GROWTH_PER_FOOD;
         foodToRemove.push(item.id);
@@ -603,35 +656,48 @@ function checkFoodCollisionsInRoom(room: GameRoom): void {
 }
 
 // =============================================================================
-// COLLISION SYSTEM (Room-aware)
+// COLLISION SYSTEM (Room-aware, Optimized with spatial grid)
 // =============================================================================
+
+// Maximum distance to check for player collisions (head + longest possible tail)
+const MAX_COLLISION_RADIUS = 500;
 
 function checkPlayerCollisionsInRoom(room: GameRoom): void {
   const playersArray = Array.from(room.players.values()).filter(p => p.alive);
   const deaths: Array<{ player: ServerPlayerState; cause: DeathCause; killer?: ServerPlayerState }> = [];
+  const deadIds = new Set<string>(); // Fast lookup for already-dead players
   
   for (const player of playersArray) {
     // Skip if already marked for death this tick
-    if (deaths.some(d => d.player.id === player.id)) continue;
+    if (deadIds.has(player.id)) continue;
     
     // Check world border collision
     if (isAtWorldBorder(player)) {
       deaths.push({ player, cause: 'world_border' });
+      deadIds.add(player.id);
       continue;
     }
     
-    // Check collision with other players
-    for (const other of playersArray) {
+    // Use spatial grid to find nearby players (much faster than checking all)
+    const nearbyPlayers = room.playerGrid.getNearby(player.x, player.y, MAX_COLLISION_RADIUS);
+    
+    for (const other of nearbyPlayers) {
       if (player.id === other.id) continue;
-      if (deaths.some(d => d.player.id === player.id)) break;
+      if (deadIds.has(player.id)) break;
       
       // Head vs Head collision
-      const headDist = distance(player.x, player.y, other.x, other.y);
-      if (headDist < PLAYER_CONFIG.RADIUS * 2) {
+      const dx = player.x - other.x;
+      const dy = player.y - other.y;
+      const headDistSq = dx * dx + dy * dy;
+      const headCollisionDist = PLAYER_CONFIG.RADIUS * 2;
+      
+      if (headDistSq < headCollisionDist * headCollisionDist) {
         if (GAME_CONSTANTS.HEAD_COLLISION_BOTH_DIE) {
           // Both die
           deaths.push({ player, cause: 'head_to_head', killer: other });
           deaths.push({ player: other, cause: 'head_to_head', killer: player });
+          deadIds.add(player.id);
+          deadIds.add(other.id);
         } else {
           // Smaller one dies (based on body length)
           const playerSize = player.bodySegments.length;
@@ -639,19 +705,26 @@ function checkPlayerCollisionsInRoom(room: GameRoom): void {
           
           if (playerSize <= otherSize) {
             deaths.push({ player, cause: 'head_to_head', killer: other });
+            deadIds.add(player.id);
           }
           if (otherSize <= playerSize) {
             deaths.push({ player: other, cause: 'head_to_head', killer: player });
+            deadIds.add(other.id);
           }
         }
         continue;
       }
       
       // Head vs Body collision (my head hits their body)
+      const bodyHitboxSq = (PLAYER_CONFIG.RADIUS + GAME_CONSTANTS.BODY_SEGMENT_HITBOX) ** 2;
       for (const segment of other.bodySegments) {
-        const segDist = distance(player.x, player.y, segment.x, segment.y);
-        if (segDist < PLAYER_CONFIG.RADIUS + GAME_CONSTANTS.BODY_SEGMENT_HITBOX) {
+        const segDx = player.x - segment.x;
+        const segDy = player.y - segment.y;
+        const segDistSq = segDx * segDx + segDy * segDy;
+        
+        if (segDistSq < bodyHitboxSq) {
           deaths.push({ player, cause: 'head_collision', killer: other });
+          deadIds.add(player.id);
           break;
         }
       }
@@ -672,12 +745,6 @@ function isAtWorldBorder(player: ServerPlayerState): boolean {
     player.y <= margin ||
     player.y >= WORLD_HEIGHT - margin
   );
-}
-
-function distance(x1: number, y1: number, x2: number, y2: number): number {
-  const dx = x1 - x2;
-  const dy = y1 - y2;
-  return Math.sqrt(dx * dx + dy * dy);
 }
 
 // =============================================================================
@@ -1074,6 +1141,9 @@ function gameLoop(): void {
   for (const room of roomManager.getAllRooms()) {
     room.incrementTick();
     
+    // Rebuild spatial grids for fast collision lookups
+    room.rebuildGrids();
+    
     // Check for respawns in this room
     checkRespawnsInRoom(room);
     
@@ -1087,10 +1157,10 @@ function gameLoop(): void {
       }
     }
     
-    // Check collisions (can cause deaths)
+    // Check collisions using spatial grid (faster)
     checkPlayerCollisionsInRoom(room);
     
-    // Update food
+    // Update food using spatial grid
     updateFoodMagnetismInRoom(room, deltaS);
     checkFoodCollisionsInRoom(room);
     maintainFoodCountInRoom(room);
@@ -1212,7 +1282,6 @@ setInterval(gameLoop, 1000 / TICK_RATE);
 
 httpServer.listen(PORT, '0.0.0.0', () => {
   const portStr = PORT.toString().padEnd(4, ' ');
-  const redisStatus = REDIS_URL ? 'Enabled' : 'Disabled';
   const maxPlayers = MAX_PLAYERS_PER_ROOM.toString().padEnd(3, ' ');
   console.log(`
 ╔═══════════════════════════════════════════════╗
@@ -1222,7 +1291,7 @@ httpServer.listen(PORT, '0.0.0.0', () => {
 ║  Environment: ${NODE_ENV.padEnd(11, ' ')}                   ║
 ║  Tick rate: ${TICK_RATE} Hz                           ║
 ║  Max players/room: ${maxPlayers}                      ║
-║  Redis: ${redisStatus.padEnd(8, ' ')}                           ║
+║  Mode: Single Instance (Optimized)            ║
 ╚═══════════════════════════════════════════════╝
   `);
 });
