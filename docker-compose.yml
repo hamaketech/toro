@@ -1,0 +1,42 @@
+# ==============================================================================
+# Tōrō - Docker Compose for Local Development & Testing
+# ==============================================================================
+# Usage:
+#   docker-compose up --build     # Build and run
+#   docker-compose down           # Stop and remove
+# ==============================================================================
+
+version: '3.8'
+
+services:
+  toro:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      # Redis URL (uncomment when Redis is available)
+      # - REDIS_URL=redis://redis:6379
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:3000/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Uncomment to add Redis for multi-instance support (Phase 6.3)
+  # redis:
+  #   image: redis:7-alpine
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis_data:/data
+  #   restart: unless-stopped
+
+# volumes:
+#   redis_data:
+

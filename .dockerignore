@@ -1,0 +1,41 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Git
+.git/
+.gitignore
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Build outputs (we rebuild in Docker)
+client/dist/
+server/dist/
+
+# Development files
+*.log
+npm-debug.log*
+.env.local
+.env.development
+.env.test
+
+# Documentation (not needed in container)
+docs/
+*.md
+!README.md
+
+# Tests
+__tests__/
+*.test.ts
+*.spec.ts
+coverage/
+
+# Misc
+.cursor/
+terminals/
+

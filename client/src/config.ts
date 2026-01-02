@@ -1,7 +1,12 @@
 import Phaser from 'phaser';
 
-// Dynamically determine server URL based on current host (enables mobile/network testing)
+// Dynamically determine server URL based on environment
 const getServerUrl = () => {
+  // In production, server and client are on the same origin
+  if (import.meta.env.PROD) {
+    return window.location.origin;
+  }
+  // In development, server runs on port 3001
   const hostname = window.location.hostname;
   return `http://${hostname}:3001`;
 };

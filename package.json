@@ -8,7 +8,13 @@
     "dev:server": "cd server && npx tsx watch src/index.ts",
     "build:client": "cd client && vite build",
     "build:server": "cd server && tsc",
-    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\""
+    "build": "npm run build:client && npm run build:server",
+    "start": "NODE_ENV=production node server/dist/index.js",
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "docker:build": "docker build -t toro .",
+    "docker:run": "docker run -p 3000:3000 --name toro-game toro",
+    "docker:up": "docker-compose up --build",
+    "docker:down": "docker-compose down"
   },
   "dependencies": {
     "phaser": "^3.80.1",

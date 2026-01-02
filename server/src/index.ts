@@ -1,6 +1,8 @@
 import express from 'express';
 import { createServer } from 'http';
 import { Server, Socket } from 'socket.io';
+import { fileURLToPath } from 'url';
+import { dirname, join } from 'path';
 import type { 
   ServerToClientEvents, 
   ClientToServerEvents, 
@@ -21,7 +23,11 @@ import { GAME_CONSTANTS } from '../../shared/types';
 // SERVER CONFIGURATION
 // =============================================================================
 
-const PORT = 3001;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+const PORT = parseInt(process.env.PORT || '3001', 10);
+const NODE_ENV = process.env.NODE_ENV || 'development';
 const TICK_RATE = 20;
 
 const WORLD_WIDTH = 6000;
@@ -83,13 +89,40 @@ const io = new Server<ClientToServerEvents, ServerToClientEvents>(httpServer, {
   },
 });
 
-app.get('/', (_req, res) => {
+// =============================================================================
+// STATIC FILE SERVING (Production)
+// =============================================================================
+
+if (NODE_ENV === 'production') {
+  // Serve the built client from client/dist
+  const clientDistPath = join(__dirname, '../../client/dist');
+  const clientPublicPath = join(__dirname, '../../client/public');
+  
+  // Serve static assets
+  app.use(express.static(clientDistPath));
+  app.use('/images', express.static(join(clientPublicPath, 'images')));
+  
+  // SPA fallback - serve index.html for all non-API routes
+  app.get('*', (req, res, next) => {
+    // Skip API routes and socket.io
+    if (req.path.startsWith('/api') || req.path.startsWith('/socket.io')) {
+      return next();
+    }
+    res.sendFile(join(clientDistPath, 'index.html'));
+  });
+  
+  console.log('📦 Production mode: Serving static files from client/dist');
+}
+
+// Health check / status endpoint
+app.get('/api/status', (_req, res) => {
   res.json({ 
     status: 'ok', 
     players: players.size,
     food: food.size,
     tick: currentTick,
     uptime: process.uptime(),
+    env: NODE_ENV,
   });
 });
 
@@ -912,13 +945,14 @@ spawnInitialFood();
 setInterval(gameLoop, 1000 / TICK_RATE);
 
 httpServer.listen(PORT, '0.0.0.0', () => {
+  const portStr = PORT.toString().padEnd(4, ' ');
   console.log(`
 ╔═══════════════════════════════════════════════╗
 ║     🏮 Tōrō Server - River of Souls 🏮        ║
 ╠═══════════════════════════════════════════════╣
-║  Server running on http://0.0.0.0:${PORT}        ║
+║  Server running on http://0.0.0.0:${portStr}       ║
+║  Environment: ${NODE_ENV.padEnd(11, ' ')}                   ║
 ║  Tick rate: ${TICK_RATE} Hz                           ║
-║  Phase 5: Juice & Polish Active               ║
 ╚═══════════════════════════════════════════════╝
   `);
 });
