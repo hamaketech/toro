@@ -2,13 +2,13 @@
 
 ## Overview
 
-Phase 6 focuses on preparing Tōrō for production deployment with containerization, load balancer compatibility, and horizontal scaling support via Redis.
+Phase 6 focuses on preparing Tōrō for production deployment with containerization, performance optimizations, and scalability through room-based architecture.
 
 ## Goals
 
 1. **Containerization**: Docker-based deployment for consistent environments
 2. **Load Balancer Compatibility**: WebSocket-only transport to bypass sticky session requirements
-3. **Horizontal Scaling**: Optional Redis adapter for multi-instance deployments
+3. **Performance Optimizations**: Spatial grid system (server) and LOD rendering (client)
 4. **Room-Based Scaling**: Automatic room creation when player limits are reached
 5. **Production Readiness**: Environment-based configuration, health checks, and logging
 
@@ -58,7 +58,7 @@ Excludes unnecessary files from the build context:
 - IDE files (`.vscode/`, `.idea/`)
 
 #### `docker-compose.yml`
-Local development and testing with optional Redis:
+Local development and testing:
 
 ```yaml
 services:
@@ -69,12 +69,8 @@ services:
     environment:
       - NODE_ENV=production
       - PORT=3000
-      - REDIS_URL=redis://redis:6379  # Optional
-
-  redis:
-    image: redis:7-alpine
-    profiles:
-      - redis  # Only starts with --profile redis
+      - CORS_ORIGIN=*
+      - MAX_PLAYERS_PER_ROOM=50
 ```
 
 ### Build Process
@@ -145,17 +141,15 @@ const getServerUrl = () => {
 
 ---
 
-## 3. Single-Instance Optimized Mode
+## 3. Performance Optimizations
 
 ### Overview
 
-Tōrō runs in **single-instance optimized mode** for best performance on a single server. This mode is ideal for most deployments and can handle 100-500+ concurrent players.
+Tōrō uses a **single-instance optimized architecture** with performance optimizations on both server and client to handle 100-500+ concurrent players smoothly.
 
-### Performance Optimizations
+### Server-Side: Spatial Grid System
 
-#### Spatial Grid System
-
-The server uses a spatial partitioning grid to dramatically speed up collision detection:
+The server uses spatial partitioning to dramatically speed up collision detection:
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -175,13 +169,10 @@ The server uses a spatial partitioning grid to dramatically speed up collision d
 │    │     │     │     │     │     │     │                           │
 │    └─────┴─────┴─────┴─────┴─────┴─────┘                           │
 │                                                                     │
-│    Player C only checks collision with food in nearby 9 cells,      │
-│    not all 100+ food items on the map!                              │
-│                                                                     │
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-#### Optimizations Applied
+#### Server Optimizations
 
 | Optimization | Before | After | Impact |
 |--------------|--------|-------|--------|
@@ -190,52 +181,58 @@ The server uses a spatial partitioning grid to dramatically speed up collision d
 | Distance checks | `Math.sqrt()` | Squared distances | ~2x faster |
 | Death tracking | `Array.some()` | `Set.has()` | O(1) lookup |
 
-### Implementation
+### Client-Side: Level of Detail (LOD) Rendering
+
+#### Body Segment LOD
+
+Players can collect 1000+ souls, but rendering all segments would be too expensive. The client uses LOD to limit visual segments:
+
+| Player Size | Visual Segments | Strategy |
+|-------------|-----------------|----------|
+| ≤150 souls | All | Render every segment |
+| 500 souls | ~150 | Render every ~3rd segment |
+| 1000 souls | ~150 | Render every ~7th segment |
 
 ```typescript
-// Spatial grid for fast collision lookups
-const GRID_CELL_SIZE = 200; // pixels per cell
+// Smart LOD selection
+private static readonly MAX_LOCAL_VISUAL_SEGMENTS = 150;   // Local player
+private static readonly MAX_REMOTE_VISUAL_SEGMENTS = 80;   // Other players
 
-class SpatialGrid<T extends { x: number; y: number; id: string }> {
-  private cells: Map<string, Set<T>> = new Map();
-  
-  // Get all items within radius of a point
-  getNearby(x: number, y: number, radius: number): T[] {
-    // Only check cells that could contain nearby items
-    const minCellX = Math.floor((x - radius) / GRID_CELL_SIZE);
-    const maxCellX = Math.floor((x + radius) / GRID_CELL_SIZE);
-    // ... returns items from relevant cells only
-  }
-}
-
-// Each room has its own spatial grids
-class GameRoom {
-  readonly playerGrid: SpatialGrid<ServerPlayerState>;
-  readonly foodGrid: SpatialGrid<Hitodama>;
-  
-  rebuildGrids(): void {
-    // Called once per tick, before collision checks
-  }
-}
+// Priority rendering:
+// - First 10 segments (near head) - always rendered
+// - Middle segments - evenly distributed
+// - Last 5 segments (tail tip) - always rendered
 ```
 
-### Capacity
+Visual compensation:
+- Segments are slightly larger when using LOD
+- Spacing adjusts to maintain tail appearance
+- Gameplay unchanged (server tracks all segments)
 
-A single Render instance can handle:
+#### Food Rendering Optimizations
 
-| Instance Type | Concurrent Players | Rooms |
-|---------------|-------------------|-------|
-| Free/Starter | ~100-200 | 5-10 |
-| Standard | ~300-500 | 15-25 |
-| Pro | ~500-1000 | 30-50 |
+```typescript
+// Viewport culling - only render visible food
+private static readonly FOOD_RENDER_MARGIN = 200;     // Extra margin
+private static readonly MAX_VISIBLE_FOOD = 300;       // Hard cap
+private static readonly FOOD_ANIMATION_DISTANCE = 600; // Animation cutoff
+```
 
-### When to Scale
+| Distance from Player | Rendering |
+|---------------------|-----------|
+| Within 600px | Full animations (float, pulse, glow) |
+| Beyond 600px | Static appearance (no animation cost) |
+| Off-screen | Not rendered (0 cost) |
+| Golden food | Always animated (priority loot) |
 
-Consider upgrading when you see:
-- CPU usage consistently > 80%
-- Memory usage > 80%
-- Tick rate dropping below 20 Hz
-- Player complaints about lag
+### Death Drop System
+
+When a player dies, their body segments drop as a mix of food types:
+
+| Type | Chance | Value | Appearance |
+|------|--------|-------|------------|
+| Normal Ghost | ~70% | 1 | Cyan/teal glow |
+| Golden Ghost | ~30% | 3-4 | Orange/gold, larger, shimmers |
 
 ---
 
@@ -258,80 +255,54 @@ const MIN_ROOMS = 1; // Always keep at least 1 room
 ┌─────────────────────────────────────────────────────────┐
 │                    RoomManager                          │
 │  - Creates rooms when needed                            │
-│  - Assigns players to least-full room                   │
+│  - Assigns players to available rooms                   │
+│  - Supports room codes for friends to join together     │
 │  - Cleans up empty rooms                                │
 └────────────────────────┬────────────────────────────────┘
                          │
         ┌────────────────┼────────────────┐
         │                │                │
    ┌────▼────┐      ┌────▼────┐      ┌────▼────┐
-   │ Room 1  │      │ Room 2  │      │ Room N  │
+   │ FIRE-42 │      │ MOON-17 │      │ STAR-99 │
    │ 45/50   │      │ 30/50   │      │  5/50   │
    │ players │      │ players │      │ players │
    └─────────┘      └─────────┘      └─────────┘
         │                │                │
     Own food         Own food         Own food
     Own state        Own state        Own state
-    Own game loop    Own game loop    Own game loop
+    Own grid         Own grid         Own grid
 ```
+
+### Room Codes
+
+Players can share room codes to play together:
+
+```
+https://toro-b5mm.onrender.com?room=FIRE-42
+```
+
+- Room code displayed in-game (top-right corner)
+- URL updates with room code for easy sharing
+- Main menu has optional room code input
 
 ### GameRoom Class
 
 Each room is completely isolated with its own:
 - Player list
 - Food items
+- Spatial grids (for collision)
 - Game tick counter
-- Collision detection
-- Scoreboard
 
 ```typescript
 class GameRoom {
   readonly id: string;
   readonly players: Map<string, ServerPlayerState>;
   readonly food: Map<string, Hitodama>;
+  readonly playerGrid: SpatialGrid<ServerPlayerState>;
+  readonly foodGrid: SpatialGrid<Hitodama>;
   
-  // Each room has independent game state
   isFull(): boolean { return this.players.size >= MAX_PLAYERS_PER_ROOM; }
   isEmpty(): boolean { return this.players.size === 0; }
-}
-```
-
-### Player Assignment
-
-When a player connects:
-1. `RoomManager.findAvailableRoom()` finds the room with lowest player count that isn't full
-2. If all rooms are full, a new room is created
-3. Player joins the Socket.io room for targeted broadcasts
-
-```typescript
-io.on('connection', (socket) => {
-  const room = roomManager.findAvailableRoom();
-  const player = createPlayer(socket.id, socket, room.id);
-  room.addPlayer(player);
-  
-  // All game events are room-scoped
-  io.to(room.socketRoom).emit('gameState', snapshot);
-});
-```
-
-### Room Cleanup
-
-Empty rooms are automatically cleaned up, but at least `MIN_ROOMS` (default: 1) is always maintained.
-
-### Status Endpoint
-
-The `/api/status` endpoint shows room information:
-
-```json
-{
-  "status": "ok",
-  "totalPlayers": 75,
-  "totalRooms": 2,
-  "rooms": [
-    { "id": "room-1", "players": 50 },
-    { "id": "room-2", "players": 25 }
-  ],
-  "maxPlayersPerRoom": 50
 }
 ```
 
@@ -365,7 +336,7 @@ MAX_PLAYERS_PER_ROOM=50
 npm run dev                    # Start dev server + client
 ```
 
-### Local Docker (Single Instance)
+### Local Docker
 
 ```bash
 npm run docker:up              # Build and run with docker-compose
@@ -388,7 +359,7 @@ npm start                      # Start production server
 
 ---
 
-## 6. Health Check Endpoints
+## 7. Health Check Endpoints
 
 ### `/api/status`
 
@@ -414,7 +385,7 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 
 ---
 
-## 7. Render Deployment
+## 8. Render Deployment
 
 ### Services Overview
 
@@ -454,28 +425,14 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
 | **Instance** | Starter ($7/mo) or higher |
 | **Health Check Path** | `/api/status` |
 
-### Environment Variables (Web Service)
+### Environment Variables
 
 ```bash
-# Required
 PORT=3000
 NODE_ENV=production
-
-# CORS - your Render URL
 CORS_ORIGIN=https://toro-b5mm.onrender.com
-
-# Optional - adjust as needed
 MAX_PLAYERS_PER_ROOM=50
 ```
-
-### Redis Key-Value Configuration
-
-| Setting | Value |
-|---------|-------|
-| **Name** | `toro-redis` |
-| **Region** | Oregon (US West) ⚠️ Must match web service! |
-| **Maxmemory Policy** | `allkeys-lru` |
-| **Instance** | Free ($0) for testing, Starter ($7/mo) for production |
 
 ### Deployment Steps
 
@@ -574,23 +531,36 @@ Check server logs for startup:
 - `docs/RFC-006-phase6-infrastructure.md` - This document
 
 ### Modified
-- `package.json` - Added esbuild, redis, build scripts
-- `server/src/index.ts` - Redis adapter, CORS, env vars
+- `package.json` - Added esbuild, build scripts
+- `server/src/index.ts` - Spatial grid, CORS, room system, env vars
 - `client/src/config.ts` - Production URL detection
-- `client/src/scenes/GameScene.ts` - WebSocket transport (already had this)
+- `client/src/scenes/GameScene.ts` - LOD rendering, food culling, WebSocket transport
 
 ---
 
 ## Testing Checklist
 
-- [ ] `npm run build` completes successfully
-- [ ] `npm start` runs the production server
-- [ ] `npm run docker:up` builds and runs container
-- [ ] Health check endpoint responds at `/api/status`
-- [ ] Client connects via WebSocket in production
-- [ ] Game functions correctly in container
-- [ ] Redis adapter connects when REDIS_URL is set
-- [ ] Server falls back gracefully without Redis
+- [x] `npm run build` completes successfully
+- [x] `npm start` runs the production server
+- [x] `npm run docker:up` builds and runs container
+- [x] Health check endpoint responds at `/api/status`
+- [x] Client connects via WebSocket in production
+- [x] Game functions correctly in container
+- [x] Room codes work for joining friends
+- [x] LOD rendering handles 1000+ body segments
+- [x] Food culling prevents lag with many food items
+
+---
+
+## Performance Summary
+
+| Component | Optimization | Benefit |
+|-----------|--------------|---------|
+| Server collision | Spatial grid | O(n) vs O(n²) |
+| Body segments | LOD (max 150 visual) | Handles 1000+ souls |
+| Food rendering | Viewport culling | Only renders visible |
+| Food animations | Distance-based | Static when far |
+| Death drops | Mixed values | Golden + normal ghosts |
 
 ---
 
@@ -598,5 +568,6 @@ Check server logs for startup:
 
 ✅ **Phase 6 Complete**
 
-All infrastructure and deployment components are implemented and ready for production deployment on Render, Coolify, or any Docker-compatible platform.
+All infrastructure, deployment, and performance components are implemented. The game is deployed and running at:
 
+**https://toro-b5mm.onrender.com**

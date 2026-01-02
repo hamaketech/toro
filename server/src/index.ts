@@ -770,26 +770,40 @@ function killPlayerInRoom(
     killer.kills++;
   }
   
-  // Drop all body segments as high-value food
+  // Drop body segments as a mix of golden ghosts (high value) and normal ghosts
+  // ~30% golden (value 3-4), ~70% normal (value 1)
+  const GOLDEN_CHANCE = 0.3;
+  const GOLDEN_VALUE_MIN = 3;
+  const GOLDEN_VALUE_MAX = 4;
+  const NORMAL_VALUE = 1;
+  
   let foodDropped = 0;
   for (const segment of player.bodySegments) {
+    const isGolden = Math.random() < GOLDEN_CHANCE;
+    const value = isGolden 
+      ? GOLDEN_VALUE_MIN + Math.floor(Math.random() * (GOLDEN_VALUE_MAX - GOLDEN_VALUE_MIN + 1))
+      : NORMAL_VALUE;
+    
     spawnFoodInRoom(room,
       segment.x + (Math.random() - 0.5) * 30,
       segment.y + (Math.random() - 0.5) * 30,
-      GAME_CONSTANTS.DEATH_DROP_VALUE
+      value
     );
     foodDropped++;
   }
   
-  // Also drop some food at the head position
+  // Drop food at the head position - always golden (rewarding the killer)
   const headDrops = Math.min(5, Math.floor(player.score / 10) + 1);
   for (let i = 0; i < headDrops; i++) {
     const angle = (i / headDrops) * Math.PI * 2;
     const dist = 20 + Math.random() * 30;
+    const isGolden = Math.random() < 0.5; // 50% chance for head drops
+    const value = isGolden ? GOLDEN_VALUE_MAX : NORMAL_VALUE;
+    
     spawnFoodInRoom(room,
       player.x + Math.cos(angle) * dist,
       player.y + Math.sin(angle) * dist,
-      GAME_CONSTANTS.DEATH_DROP_VALUE
+      value
     );
     foodDropped++;
   }

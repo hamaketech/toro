@@ -1027,17 +1027,25 @@ export class GameScene extends Phaser.Scene {
   // LOCAL PLAYER BODY SEGMENTS
   // ===========================================================================
 
+  // LOD (Level of Detail) settings for performance
+  private static readonly MAX_LOCAL_VISUAL_SEGMENTS = 150;  // Max rendered for local player
+  private static readonly MAX_REMOTE_VISUAL_SEGMENTS = 80;  // Max rendered for other players
+  
   private updateLocalBodySegments(segments: BodySegment[]): void {
     const { GLOW_MULTIPLIER, PULSE_AMOUNT, PULSE_SPEED } = GAME_CONFIG.BODY;
     const { SPIRIT_GLOW_HEAD, SPIRIT_GLOW_TAIL, SPIRIT_CORE_HEAD, SPIRIT_CORE_TAIL } = GAME_CONFIG.COLORS;
     
-    while (this.localBodySegments.length < segments.length) {
+    // LOD: Calculate which segments to render
+    const totalSegments = segments.length;
+    const maxVisual = GameScene.MAX_LOCAL_VISUAL_SEGMENTS;
+    const stride = totalSegments > maxVisual ? Math.ceil(totalSegments / maxVisual) : 1;
+    const visualIndices = this.getVisualSegmentIndices(totalSegments, maxVisual);
+    const visualCount = visualIndices.length;
+    
+    // Adjust visual segment pool size
+    while (this.localBodySegments.length < visualCount) {
       const index = this.localBodySegments.length;
       const phaseOffset = Math.random() * Math.PI * 2;
-      
-      // Initialize position from server or use head position
-      const initX = segments[index]?.x ?? this.lantern.x;
-      const initY = segments[index]?.y ?? this.lantern.y;
       
       const glow = this.add.arc(0, 0, 10, 0, 360, false, SPIRIT_GLOW_HEAD, 0.5);
       const core = this.add.arc(0, 0, 5, 0, 360, false, SPIRIT_CORE_HEAD, 1);
@@ -1047,12 +1055,12 @@ export class GameScene extends Phaser.Scene {
       
       this.localBodySegments.push({ 
         glow, core, phaseOffset, 
-        currentX: initX, currentY: initY,
+        currentX: this.lantern.x, currentY: this.lantern.y,
         velX: 0, velY: 0
       });
     }
     
-    while (this.localBodySegments.length > segments.length) {
+    while (this.localBodySegments.length > visualCount) {
       const removed = this.localBodySegments.pop();
       if (removed) {
         removed.glow.destroy();
@@ -1060,66 +1068,51 @@ export class GameScene extends Phaser.Scene {
       }
     }
     
-    // First segment follows the head with spring physics
-    // Other segments follow the previous segment
-    for (let i = 0; i < segments.length; i++) {
-      const visual = this.localBodySegments[i];
+    // Update visual segments using LOD indices
+    let prevX = this.lantern.x;
+    let prevY = this.lantern.y;
+    
+    for (let vi = 0; vi < visualCount; vi++) {
+      const actualIndex = visualIndices[vi];
+      const visual = this.localBodySegments[vi];
+      const serverSeg = segments[actualIndex];
       
-      // Determine what this segment should follow
-      let targetX: number;
-      let targetY: number;
+      if (!serverSeg) continue;
       
-      if (i === 0) {
-        // First segment follows the head (lantern)
-        targetX = this.lantern.x;
-        targetY = this.lantern.y;
-      } else {
-        // Other segments follow the previous segment's smoothed position
-        const prevVisual = this.localBodySegments[i - 1];
-        targetX = prevVisual.currentX;
-        targetY = prevVisual.currentY;
-      }
+      // Target position from server (LOD uses actual segment positions)
+      const targetX = serverSeg.x;
+      const targetY = serverSeg.y;
       
-      // Calculate desired distance from target
-      const spacing = i === 0 ? 30 : 20; // First segment gap vs normal spacing
-      
-      // Vector from current to target
+      // Smooth towards target
       const dx = targetX - visual.currentX;
       const dy = targetY - visual.currentY;
       const dist = Math.sqrt(dx * dx + dy * dy);
       
+      // Spacing scales with stride (segments are further apart when skipping)
+      const baseSpacing = vi === 0 ? 30 : 20;
+      const spacing = baseSpacing * (stride > 1 ? stride * 0.7 : 1);
+      
       if (dist > spacing) {
-        // Calculate direction
         const dirX = dx / dist;
         const dirY = dy / dist;
-        
-        // Move towards target - keep at spacing distance
-        // Use stronger smoothing and snap if too far
         const overshoot = dist - spacing;
-        const moveSpeed = overshoot > 50 ? 1 : 0.4; // Snap if too far, otherwise smooth
-        
+        const moveSpeed = overshoot > 80 ? 1 : 0.4;
         visual.currentX += dirX * overshoot * moveSpeed;
         visual.currentY += dirY * overshoot * moveSpeed;
-      } else if (dist < spacing * 0.5) {
-        // Too close - push away slightly
-        const dirX = dx / dist || 0;
-        const dirY = dy / dist || 0;
-        visual.currentX -= dirX * (spacing - dist) * 0.2;
-        visual.currentY -= dirY * (spacing - dist) * 0.2;
       }
       
-      const progress = this.getSegmentProgress(i, segments.length);
+      // Progress based on actual position in the full tail
+      const progress = this.getSegmentProgress(actualIndex, totalSegments);
       const radius = this.getSegmentRadius(progress);
       const opacity = this.getSegmentOpacity(progress);
       
-      // Use smoothed position for wobble calculation
-      const smoothedSegment = { x: visual.currentX, y: visual.currentY };
-      const smoothedPrev = i > 0 ? { 
-        x: this.localBodySegments[i - 1].currentX, 
-        y: this.localBodySegments[i - 1].currentY 
-      } : null;
+      // Scale radius up when using LOD to fill gaps
+      const lodRadiusMultiplier = stride > 1 ? 1 + (stride - 1) * 0.15 : 1;
       
-      const wobble = this.getWobbleOffset(i, visual.phaseOffset, smoothedPrev, smoothedSegment);
+      const smoothedSegment = { x: visual.currentX, y: visual.currentY };
+      const smoothedPrev = { x: prevX, y: prevY };
+      
+      const wobble = this.getWobbleOffset(vi, visual.phaseOffset, smoothedPrev, smoothedSegment);
       
       const pulsePhase = this.animTime * PULSE_SPEED + visual.phaseOffset;
       const pulse = 1 + Math.sin(pulsePhase) * PULSE_AMOUNT * (1 - progress * 0.5);
@@ -1130,8 +1123,8 @@ export class GameScene extends Phaser.Scene {
       visual.glow.setPosition(finalX, finalY);
       visual.core.setPosition(finalX, finalY);
       
-      const glowRadius = radius * GLOW_MULTIPLIER * pulse;
-      const coreRadius = radius * pulse;
+      const glowRadius = radius * GLOW_MULTIPLIER * pulse * lodRadiusMultiplier;
+      const coreRadius = radius * pulse * lodRadiusMultiplier;
       
       visual.glow.setRadius(glowRadius);
       visual.core.setRadius(coreRadius);
@@ -1141,7 +1134,54 @@ export class GameScene extends Phaser.Scene {
       
       visual.glow.setFillStyle(glowColor, opacity * 0.5);
       visual.core.setFillStyle(coreColor, opacity);
+      
+      prevX = visual.currentX;
+      prevY = visual.currentY;
     }
+  }
+  
+  // Returns indices of segments to render (LOD selection)
+  private getVisualSegmentIndices(total: number, maxVisual: number): number[] {
+    if (total <= maxVisual) {
+      // Render all segments
+      return Array.from({ length: total }, (_, i) => i);
+    }
+    
+    // LOD: Select evenly distributed segments
+    // Always include first few and last few for visual continuity
+    const indices: number[] = [];
+    const guaranteedStart = 10; // Always render first 10
+    const guaranteedEnd = 5;    // Always render last 5
+    const middleCount = maxVisual - guaranteedStart - guaranteedEnd;
+    
+    // First segments (head area - most visible)
+    for (let i = 0; i < Math.min(guaranteedStart, total); i++) {
+      indices.push(i);
+    }
+    
+    // Middle segments (evenly spaced)
+    if (total > guaranteedStart + guaranteedEnd && middleCount > 0) {
+      const middleStart = guaranteedStart;
+      const middleEnd = total - guaranteedEnd;
+      const middleRange = middleEnd - middleStart;
+      const step = middleRange / middleCount;
+      
+      for (let i = 0; i < middleCount; i++) {
+        const idx = Math.floor(middleStart + i * step);
+        if (idx > indices[indices.length - 1]) {
+          indices.push(idx);
+        }
+      }
+    }
+    
+    // Last segments (tail tip)
+    for (let i = Math.max(0, total - guaranteedEnd); i < total; i++) {
+      if (!indices.includes(i)) {
+        indices.push(i);
+      }
+    }
+    
+    return indices;
   }
 
   // ===========================================================================
@@ -1218,12 +1258,17 @@ export class GameScene extends Phaser.Scene {
     const { GLOW_MULTIPLIER, PULSE_AMOUNT, PULSE_SPEED } = GAME_CONFIG.BODY;
     const { OTHER_SPIRIT_GLOW_HEAD, OTHER_SPIRIT_GLOW_TAIL, OTHER_SPIRIT_CORE_HEAD, OTHER_SPIRIT_CORE_TAIL } = GAME_CONFIG.COLORS;
     
-    while (visual.bodySegments.length < segments.length) {
+    // LOD: Calculate which segments to render (less for remote players)
+    const totalSegments = segments.length;
+    const maxVisual = GameScene.MAX_REMOTE_VISUAL_SEGMENTS;
+    const stride = totalSegments > maxVisual ? Math.ceil(totalSegments / maxVisual) : 1;
+    const visualIndices = this.getVisualSegmentIndices(totalSegments, maxVisual);
+    const visualCount = visualIndices.length;
+    
+    // Adjust visual segment pool size
+    while (visual.bodySegments.length < visualCount) {
       const index = visual.bodySegments.length;
       const phaseOffset = Math.random() * Math.PI * 2;
-      
-      const initX = segments[index]?.x ?? visual.container.x;
-      const initY = segments[index]?.y ?? visual.container.y;
       
       const glow = this.add.arc(0, 0, 10, 0, 360, false, OTHER_SPIRIT_GLOW_HEAD, 0.5);
       const core = this.add.arc(0, 0, 5, 0, 360, false, OTHER_SPIRIT_CORE_HEAD, 1);
@@ -1233,12 +1278,12 @@ export class GameScene extends Phaser.Scene {
       
       visual.bodySegments.push({ 
         glow, core, phaseOffset, 
-        currentX: initX, currentY: initY, 
+        currentX: visual.container.x, currentY: visual.container.y, 
         velX: 0, velY: 0 
       });
     }
     
-    while (visual.bodySegments.length > segments.length) {
+    while (visual.bodySegments.length > visualCount) {
       const removed = visual.bodySegments.pop();
       if (removed) {
         removed.glow.destroy();
@@ -1246,55 +1291,50 @@ export class GameScene extends Phaser.Scene {
       }
     }
     
-    // Smooth segment following (same as local player)
-    for (let i = 0; i < segments.length; i++) {
-      const segVisual = visual.bodySegments[i];
+    // Update visual segments using LOD indices
+    let prevX = visual.container.x;
+    let prevY = visual.container.y;
+    
+    for (let vi = 0; vi < visualCount; vi++) {
+      const actualIndex = visualIndices[vi];
+      const segVisual = visual.bodySegments[vi];
+      const serverSeg = segments[actualIndex];
       
-      // Determine target
-      let targetX: number;
-      let targetY: number;
+      if (!serverSeg) continue;
       
-      if (i === 0) {
-        targetX = visual.container.x;
-        targetY = visual.container.y;
-      } else {
-        const prevVisual = visual.bodySegments[i - 1];
-        targetX = prevVisual.currentX;
-        targetY = prevVisual.currentY;
-      }
+      // Target from server
+      const targetX = serverSeg.x;
+      const targetY = serverSeg.y;
       
-      const spacing = i === 0 ? 30 : 20;
-      
+      // Smooth towards target
       const dx = targetX - segVisual.currentX;
       const dy = targetY - segVisual.currentY;
       const dist = Math.sqrt(dx * dx + dy * dy);
+      
+      const baseSpacing = vi === 0 ? 30 : 20;
+      const spacing = baseSpacing * (stride > 1 ? stride * 0.7 : 1);
       
       if (dist > spacing) {
         const dirX = dx / dist;
         const dirY = dy / dist;
         const overshoot = dist - spacing;
-        const moveSpeed = overshoot > 50 ? 1 : 0.4;
-        
+        const moveSpeed = overshoot > 80 ? 1 : 0.4;
         segVisual.currentX += dirX * overshoot * moveSpeed;
         segVisual.currentY += dirY * overshoot * moveSpeed;
-      } else if (dist < spacing * 0.5) {
-        const dirX = dx / dist || 0;
-        const dirY = dy / dist || 0;
-        segVisual.currentX -= dirX * (spacing - dist) * 0.2;
-        segVisual.currentY -= dirY * (spacing - dist) * 0.2;
       }
       
-      const progress = this.getSegmentProgress(i, segments.length);
+      // Progress based on actual position in full tail
+      const progress = this.getSegmentProgress(actualIndex, totalSegments);
       const radius = this.getSegmentRadius(progress);
       const opacity = this.getSegmentOpacity(progress);
       
-      const smoothedSegment = { x: segVisual.currentX, y: segVisual.currentY };
-      const smoothedPrev = i > 0 ? { 
-        x: visual.bodySegments[i - 1].currentX, 
-        y: visual.bodySegments[i - 1].currentY 
-      } : null;
+      // Scale radius up when using LOD
+      const lodRadiusMultiplier = stride > 1 ? 1 + (stride - 1) * 0.15 : 1;
       
-      const wobble = this.getWobbleOffset(i, segVisual.phaseOffset, smoothedPrev, smoothedSegment);
+      const smoothedSegment = { x: segVisual.currentX, y: segVisual.currentY };
+      const smoothedPrev = { x: prevX, y: prevY };
+      
+      const wobble = this.getWobbleOffset(vi, segVisual.phaseOffset, smoothedPrev, smoothedSegment);
       
       const pulsePhase = this.animTime * PULSE_SPEED + segVisual.phaseOffset;
       const pulse = 1 + Math.sin(pulsePhase) * PULSE_AMOUNT * (1 - progress * 0.5);
@@ -1305,8 +1345,8 @@ export class GameScene extends Phaser.Scene {
       segVisual.glow.setPosition(finalX, finalY);
       segVisual.core.setPosition(finalX, finalY);
       
-      const glowRadius = radius * GLOW_MULTIPLIER * pulse;
-      const coreRadius = radius * pulse;
+      const glowRadius = radius * GLOW_MULTIPLIER * pulse * lodRadiusMultiplier;
+      const coreRadius = radius * pulse * lodRadiusMultiplier;
       
       segVisual.glow.setRadius(glowRadius);
       segVisual.core.setRadius(coreRadius);
@@ -1316,6 +1356,9 @@ export class GameScene extends Phaser.Scene {
       
       segVisual.glow.setFillStyle(glowColor, opacity * 0.5);
       segVisual.core.setFillStyle(coreColor, opacity);
+      
+      prevX = segVisual.currentX;
+      prevY = segVisual.currentY;
     }
   }
 
@@ -1332,29 +1375,85 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ===========================================================================
-  // FOOD RENDERING (Ghosts)
+  // FOOD RENDERING (Ghosts) - Optimized with viewport culling
   // ===========================================================================
+
+  // Food rendering limits
+  private static readonly FOOD_RENDER_MARGIN = 200;  // Extra margin around viewport
+  private static readonly MAX_VISIBLE_FOOD = 300;    // Hard cap on rendered food
+  private static readonly FOOD_ANIMATION_DISTANCE = 600; // Only animate food within this distance
 
   private updateFood(): void {
     const interpolatedFood = this.snapshotInterpolation.getInterpolatedFood();
+    const camera = this.cameras.main;
+    
+    // Calculate viewport bounds with margin
+    const viewLeft = camera.scrollX - GameScene.FOOD_RENDER_MARGIN;
+    const viewRight = camera.scrollX + camera.width + GameScene.FOOD_RENDER_MARGIN;
+    const viewTop = camera.scrollY - GameScene.FOOD_RENDER_MARGIN;
+    const viewBottom = camera.scrollY + camera.height + GameScene.FOOD_RENDER_MARGIN;
+    
+    // Player position for distance-based animation
+    const playerX = this.lantern?.x ?? camera.scrollX + camera.width / 2;
+    const playerY = this.lantern?.y ?? camera.scrollY + camera.height / 2;
+    
+    let visibleCount = 0;
+    const visibleIds = new Set<string>();
+    
+    // First pass: identify visible food (prioritize golden food)
+    const goldenFood: Array<[string, InterpolatedFood]> = [];
+    const normalFood: Array<[string, InterpolatedFood]> = [];
     
     for (const [id, foodState] of interpolatedFood) {
-      this.updateFoodVisual(id, foodState);
+      // Viewport culling - skip food outside view
+      if (foodState.x < viewLeft || foodState.x > viewRight || 
+          foodState.y < viewTop || foodState.y > viewBottom) {
+        continue;
+      }
+      
+      if (foodState.value > 1) {
+        goldenFood.push([id, foodState]);
+      } else {
+        normalFood.push([id, foodState]);
+      }
     }
     
+    // Render golden food first (always prioritized)
+    for (const [id, foodState] of goldenFood) {
+      if (visibleCount >= GameScene.MAX_VISIBLE_FOOD) break;
+      visibleIds.add(id);
+      this.updateFoodVisual(id, foodState, playerX, playerY);
+      visibleCount++;
+    }
+    
+    // Then render normal food up to limit
+    for (const [id, foodState] of normalFood) {
+      if (visibleCount >= GameScene.MAX_VISIBLE_FOOD) break;
+      visibleIds.add(id);
+      this.updateFoodVisual(id, foodState, playerX, playerY);
+      visibleCount++;
+    }
+    
+    // Remove food visuals that are no longer visible
     for (const id of this.foodVisuals.keys()) {
-      if (!interpolatedFood.has(id)) {
+      if (!visibleIds.has(id)) {
         this.removeFoodVisual(id);
       }
     }
   }
 
-  private updateFoodVisual(id: string, state: InterpolatedFood): void {
+  private updateFoodVisual(id: string, state: InterpolatedFood, playerX: number, playerY: number): void {
     let visual = this.foodVisuals.get(id);
     
     // Detect golden food (value > base value)
     const isGolden = state.value > 1;
     const sizeMultiplier = isGolden ? 1.3 : 1;
+    
+    // Calculate distance to player for animation LOD
+    const dx = state.x - playerX;
+    const dy = state.y - playerY;
+    const distToPlayer = Math.sqrt(dx * dx + dy * dy);
+    const shouldAnimate = distToPlayer < GameScene.FOOD_ANIMATION_DISTANCE || isGolden;
     
     if (!visual) {
       const container = this.add.container(state.x, state.y);
@@ -1388,6 +1487,19 @@ export class GameScene extends Phaser.Scene {
     
     visual.container.setPosition(state.x, state.y);
     
+    // Skip complex animations for distant food (performance optimization)
+    if (!shouldAnimate) {
+      // Static appearance for distant food
+      visual.core.setY(0);
+      visual.glow.setY(0);
+      visual.core.setScale(0.8 * sizeMultiplier);
+      visual.glow.setScale(1.4 * sizeMultiplier);
+      visual.glow.setAlpha(isGolden ? 0.4 : 0.25);
+      visual.core.setRotation(0);
+      return;
+    }
+    
+    // Full animations only for nearby food or golden food
     // Floating animation - golden food floats more dramatically
     const floatSpeed = isGolden ? 3 : 2;
     const floatAmount = isGolden ? 5 : 3;

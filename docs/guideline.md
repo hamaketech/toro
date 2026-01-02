@@ -94,24 +94,38 @@
 * Server: Configurable CORS via `CORS_ORIGIN` env var
 * Client auto-detects production URL (same origin)
 
-**3. Performance Optimizations** ✅
+**3. Server Performance Optimizations** ✅
 * Spatial grid system for O(n) collision detection
 * Squared distance calculations (avoid sqrt)
 * Optimized Set-based death tracking
 * Single-instance mode for 100-500 player capacity
 
-**4. Environment Variables**
+**4. Client Performance Optimizations** ✅
+* Body segment LOD: Max 150 visual segments (handles 1000+ souls)
+* Food viewport culling: Only render visible food
+* Food animation distance: Static beyond 600px from player
+* Golden food priority: Always rendered with animations
+
+**5. Room System** ✅
+* Auto-creates rooms when player limits reached
+* Room codes for playing with friends (?room=CODE)
+* Isolated game state per room
+* Auto-cleanup of empty rooms
+
+**6. Environment Variables**
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PORT` | 3001/3000 | Server port |
 | `NODE_ENV` | development | Environment |
 | `CORS_ORIGIN` | * | Allowed origins |
-| `MAX_PLAYERS_PER_ROOM` | 50 | Players per room |
+| `MAX_PLAYERS_PER_ROOM` | 10 | Players per room |
 
-**5. Deployment Commands**
+**7. Deployment Commands**
 ```bash
 npm run dev          # Development
 npm run build        # Build for production
 npm start            # Run production server
 npm run docker:up    # Docker
 ```
+
+**Production URL:** https://toro-b5mm.onrender.com
