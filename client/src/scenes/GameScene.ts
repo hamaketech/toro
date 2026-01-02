@@ -28,24 +28,21 @@ interface SceneData {
 interface BodySegmentVisual {
   glow: Phaser.GameObjects.Arc;
   core: Phaser.GameObjects.Arc;
-  /** Unique phase offset for animations */
   phaseOffset: number;
 }
 
 interface RemotePlayerVisual {
   container: Phaser.GameObjects.Container;
-  glow: Phaser.GameObjects.Arc;
-  core: Phaser.GameObjects.Arc;
+  glow: Phaser.GameObjects.Image;
+  core: Phaser.GameObjects.Image;
   nameText: Phaser.GameObjects.Text;
   bodySegments: BodySegmentVisual[];
 }
 
 interface FoodVisual {
   container: Phaser.GameObjects.Container;
-  glow: Phaser.GameObjects.Arc;
-  innerGlow: Phaser.GameObjects.Arc;
-  core: Phaser.GameObjects.Arc;
-  /** Unique phase offset for animations */
+  glow: Phaser.GameObjects.Image;
+  core: Phaser.GameObjects.Image;
   phaseOffset: number;
 }
 
@@ -76,8 +73,8 @@ export class GameScene extends Phaser.Scene {
   
   // Local player graphics
   private lantern!: Phaser.GameObjects.Container;
-  private lanternGlow!: Phaser.GameObjects.Arc;
-  private lanternCore!: Phaser.GameObjects.Arc;
+  private lanternGlow!: Phaser.GameObjects.Image;
+  private lanternCore!: Phaser.GameObjects.Image;
   private localBodySegments: BodySegmentVisual[] = [];
   
   // Other players
@@ -126,6 +123,13 @@ export class GameScene extends Phaser.Scene {
     this.playerName = data?.playerName || 'Wandering Soul';
   }
 
+  preload(): void {
+    // Load SVG images from public folder
+    this.load.svg('lantern', '/images/lantern.svg', { width: 64, height: 64 });
+    this.load.svg('devil-mask', '/images/devil-mask.svg', { width: 64, height: 64 });
+    this.load.svg('ghost', '/images/ghost.svg', { width: 32, height: 32 });
+  }
+
   create(): void {
     this.snapshotInterpolation = new SnapshotInterpolation();
     
@@ -143,7 +147,6 @@ export class GameScene extends Phaser.Scene {
    * Setup bloom post-processing effect
    */
   private setupBloom(): void {
-    // Apply bloom to the main camera
     if (this.game.renderer instanceof Phaser.Renderer.WebGL.WebGLRenderer) {
       try {
         const BloomPipeline = this.game.renderer.pipelines.getPostPipeline('BloomPipeline');
@@ -200,19 +203,16 @@ export class GameScene extends Phaser.Scene {
     this.lantern = this.add.container(startX, startY);
     this.lantern.setDepth(100);
     
-    this.lanternGlow = this.add.arc(
-      0, 0, 
-      GAME_CONFIG.PLAYER.RADIUS * 2.2, 
-      0, 360, false, 
-      GAME_CONFIG.COLORS.LANTERN_GLOW, 0.35
-    );
+    // Glow effect (larger, more transparent, blurred look)
+    this.lanternGlow = this.add.image(0, 0, 'lantern');
+    this.lanternGlow.setScale(1.4);
+    this.lanternGlow.setTint(0xffcc66); // Golden glow
+    this.lanternGlow.setAlpha(0.4);
     
-    this.lanternCore = this.add.arc(
-      0, 0, 
-      GAME_CONFIG.PLAYER.RADIUS, 
-      0, 360, false, 
-      GAME_CONFIG.COLORS.LANTERN_CORE, 1
-    );
+    // Main lantern sprite
+    this.lanternCore = this.add.image(0, 0, 'lantern');
+    this.lanternCore.setScale(0.8);
+    this.lanternCore.setTint(0xffeedd); // Warm white
     
     this.lantern.add([this.lanternGlow, this.lanternCore]);
     
@@ -221,10 +221,8 @@ export class GameScene extends Phaser.Scene {
   }
 
   private setupInput(): void {
-    // Setup cursor keys (arrow keys)
     this.cursors = this.input.keyboard?.createCursorKeys();
     
-    // Setup WASD keys
     if (this.input.keyboard) {
       this.wasdKeys = {
         W: this.input.keyboard.addKey(Phaser.Input.Keyboard.KeyCodes.W),
@@ -244,7 +242,6 @@ export class GameScene extends Phaser.Scene {
       this.isBoosting = false;
     });
     
-    // Shift key also triggers boost
     this.input.keyboard?.on('keydown-SHIFT', () => {
       if (this.isAlive) {
         this.isBoosting = true;
@@ -260,7 +257,6 @@ export class GameScene extends Phaser.Scene {
         if (this.isAlive) {
           this.isBoosting = true;
         } else {
-          // Click to respawn when dead
           this.requestRespawn();
         }
       }
@@ -277,14 +273,12 @@ export class GameScene extends Phaser.Scene {
       }
     });
     
-    // Press Enter or Space to respawn when dead
     this.input.keyboard?.on('keydown-ENTER', () => {
       if (!this.isAlive) {
         this.requestRespawn();
       }
     });
     
-    // ESC to return to main menu
     this.input.keyboard?.on('keydown-ESC', () => {
       this.returnToMenu();
     });
@@ -299,7 +293,6 @@ export class GameScene extends Phaser.Scene {
     let kx = 0;
     let ky = 0;
     
-    // Check arrow keys
     if (this.cursors) {
       if (this.cursors.left.isDown) kx -= 1;
       if (this.cursors.right.isDown) kx += 1;
@@ -307,7 +300,6 @@ export class GameScene extends Phaser.Scene {
       if (this.cursors.down.isDown) ky += 1;
     }
     
-    // Check WASD keys
     if (this.wasdKeys) {
       if (this.wasdKeys.A.isDown) kx -= 1;
       if (this.wasdKeys.D.isDown) kx += 1;
@@ -315,7 +307,6 @@ export class GameScene extends Phaser.Scene {
       if (this.wasdKeys.S.isDown) ky += 1;
     }
     
-    // Normalize diagonal movement
     const len = Math.sqrt(kx * kx + ky * ky);
     if (len > 0) {
       kx /= len;
@@ -350,7 +341,6 @@ export class GameScene extends Phaser.Scene {
     this.scoreboardContainer.setScrollFactor(0);
     this.scoreboardContainer.setDepth(900);
     
-    // Background
     const bg = this.add.graphics();
     bg.fillStyle(0x000000, 0.6);
     bg.fillRoundedRect(0, 0, 200, 180, 8);
@@ -358,7 +348,6 @@ export class GameScene extends Phaser.Scene {
     bg.strokeRoundedRect(0, 0, 200, 180, 8);
     this.scoreboardContainer.add(bg);
     
-    // Title
     const title = this.add.text(100, 12, '🏮 LEADERBOARD', {
       fontSize: '14px',
       fontStyle: 'bold',
@@ -367,7 +356,6 @@ export class GameScene extends Phaser.Scene {
     title.setOrigin(0.5, 0);
     this.scoreboardContainer.add(title);
     
-    // Create entry slots
     for (let i = 0; i < 5; i++) {
       const entry = this.add.text(15, 40 + i * 26, '', {
         fontSize: '13px',
@@ -450,26 +438,19 @@ export class GameScene extends Phaser.Scene {
     for (let i = this.deathParticles.length - 1; i >= 0; i--) {
       const p = this.deathParticles[i];
       
-      // Update position
       p.x += p.vx * deltaS;
       p.y += p.vy * deltaS;
-      
-      // Apply friction
       p.vx *= 0.96;
       p.vy *= 0.96;
-      
-      // Decay
       p.life -= deltaS * 0.8;
       p.alpha = p.life;
       p.size *= 0.995;
       
-      // Remove dead particles
       if (p.life <= 0 || p.size < 1) {
         this.deathParticles.splice(i, 1);
         continue;
       }
       
-      // Draw
       this.deathParticleGraphics.fillStyle(p.color, p.alpha * 0.6);
       this.deathParticleGraphics.fillCircle(p.x, p.y, p.size * 1.5);
       this.deathParticleGraphics.fillStyle(p.color, p.alpha);
@@ -480,16 +461,13 @@ export class GameScene extends Phaser.Scene {
   private showDeathOverlay(event: DeathEvent): void {
     this.isAlive = false;
     
-    // Hide local player
     this.lantern.setVisible(false);
     this.clearLocalBodySegments();
     
-    // Create death overlay
     this.deathOverlay = this.add.container(0, 0);
     this.deathOverlay.setScrollFactor(0);
     this.deathOverlay.setDepth(1000);
     
-    // Darken background
     const dimmer = this.add.rectangle(
       this.cameras.main.width / 2,
       this.cameras.main.height / 2,
@@ -500,10 +478,8 @@ export class GameScene extends Phaser.Scene {
     );
     this.deathOverlay.add(dimmer);
     
-    // Death message container
     const msgY = this.cameras.main.height / 2 - 50;
     
-    // "YOU DIED" text
     const deathText = this.add.text(
       this.cameras.main.width / 2,
       msgY - 40,
@@ -517,7 +493,6 @@ export class GameScene extends Phaser.Scene {
     deathText.setOrigin(0.5);
     this.deathOverlay.add(deathText);
     
-    // Cause of death
     const causeText = this.getCauseText(event);
     const causeLabel = this.add.text(
       this.cameras.main.width / 2,
@@ -531,7 +506,6 @@ export class GameScene extends Phaser.Scene {
     causeLabel.setOrigin(0.5);
     this.deathOverlay.add(causeLabel);
     
-    // Score
     const scoreLabel = this.add.text(
       this.cameras.main.width / 2,
       msgY + 60,
@@ -544,7 +518,6 @@ export class GameScene extends Phaser.Scene {
     scoreLabel.setOrigin(0.5);
     this.deathOverlay.add(scoreLabel);
     
-    // Respawn hint
     const hintLabel = this.add.text(
       this.cameras.main.width / 2,
       msgY + 120,
@@ -557,7 +530,6 @@ export class GameScene extends Phaser.Scene {
     hintLabel.setOrigin(0.5);
     this.deathOverlay.add(hintLabel);
     
-    // Animate hint
     this.tweens.add({
       targets: hintLabel,
       alpha: { from: 1, to: 0.4 },
@@ -623,7 +595,6 @@ export class GameScene extends Phaser.Scene {
       console.log('Connected to server with ID:', state.playerId);
       this.playerId = state.playerId;
       
-      // Join game with player name
       const joinOptions: JoinOptions = {
         name: this.playerName,
       };
@@ -664,11 +635,8 @@ export class GameScene extends Phaser.Scene {
     
     this.socket.on('playerDied', (event: DeathEvent) => {
       console.log('Player died:', event);
-      
-      // Spawn death explosion effect at location
       this.spawnDeathExplosion(event.x, event.y, event.foodDropped);
       
-      // If it's us, show death overlay
       if (event.playerId === this.playerId) {
         this.showDeathOverlay(event);
       }
@@ -680,7 +648,6 @@ export class GameScene extends Phaser.Scene {
       if (playerId === this.playerId) {
         this.hideDeathOverlay();
         
-        // Sync position from server
         const latestState = this.snapshotInterpolation.getLatestPlayerState(playerId);
         if (latestState) {
           this.clientPrediction.setPosition(latestState.x, latestState.y, latestState.angle);
@@ -710,7 +677,6 @@ export class GameScene extends Phaser.Scene {
     if (this.playerId) {
       const myServerState = snapshot.players[this.playerId];
       if (myServerState) {
-        // Check if we just became alive (server respawned us)
         if (!this.isAlive && myServerState.alive) {
           this.hideDeathOverlay();
           this.clientPrediction.setPosition(myServerState.x, myServerState.y, myServerState.angle);
@@ -731,29 +697,23 @@ export class GameScene extends Phaser.Scene {
   // SEGMENT VISUAL CALCULATIONS
   // ===========================================================================
 
-  /** Calculate progress along the body (0 = head, 1 = tail) */
   private getSegmentProgress(index: number, totalSegments: number): number {
     if (totalSegments <= 1) return 0;
     return index / (totalSegments - 1);
   }
 
-  /** Calculate segment radius based on position */
   private getSegmentRadius(progress: number): number {
     const { SEGMENT_RADIUS_MAX, SEGMENT_RADIUS_MIN } = GAME_CONFIG.BODY;
-    // Ease out for smoother tail taper
     const eased = 1 - Math.pow(progress, 0.7);
     return Phaser.Math.Linear(SEGMENT_RADIUS_MIN, SEGMENT_RADIUS_MAX, eased);
   }
 
-  /** Calculate segment opacity based on position */
   private getSegmentOpacity(progress: number): number {
     const { OPACITY_MAX, OPACITY_MIN } = GAME_CONFIG.BODY;
-    // Ease in for gentle fade
     const eased = Math.pow(progress, 0.5);
     return Phaser.Math.Linear(OPACITY_MAX, OPACITY_MIN, eased);
   }
 
-  /** Interpolate between two colors */
   private lerpColor(colorA: number, colorB: number, t: number): number {
     const rA = (colorA >> 16) & 0xff;
     const gA = (colorA >> 8) & 0xff;
@@ -770,7 +730,6 @@ export class GameScene extends Phaser.Scene {
     return (r << 16) | (g << 8) | b;
   }
 
-  /** Calculate floating wobble offset perpendicular to movement */
   private getWobbleOffset(
     index: number, 
     phaseOffset: number, 
@@ -779,7 +738,6 @@ export class GameScene extends Phaser.Scene {
   ): { x: number; y: number } {
     const { WOBBLE_AMPLITUDE, WOBBLE_SPEED } = GAME_CONFIG.BODY;
     
-    // Calculate perpendicular direction
     let perpX = 0;
     let perpY = 1;
     
@@ -788,17 +746,13 @@ export class GameScene extends Phaser.Scene {
       const dy = currentSegment.y - prevSegment.y;
       const len = Math.sqrt(dx * dx + dy * dy);
       if (len > 0.1) {
-        // Perpendicular to movement direction
         perpX = -dy / len;
         perpY = dx / len;
       }
     }
     
-    // Sine wave wobble with unique phase per segment
     const wobblePhase = this.animTime * WOBBLE_SPEED + phaseOffset + index * 0.8;
     const wobbleAmount = Math.sin(wobblePhase) * WOBBLE_AMPLITUDE;
-    
-    // Reduce wobble for segments closer to head
     const wobbleFalloff = Math.min(1, index / 3);
     
     return {
@@ -815,11 +769,8 @@ export class GameScene extends Phaser.Scene {
     const { GLOW_MULTIPLIER, PULSE_AMOUNT, PULSE_SPEED } = GAME_CONFIG.BODY;
     const { SPIRIT_GLOW_HEAD, SPIRIT_GLOW_TAIL, SPIRIT_CORE_HEAD, SPIRIT_CORE_TAIL } = GAME_CONFIG.COLORS;
     
-    // Add new segments if needed
     while (this.localBodySegments.length < segments.length) {
       const index = this.localBodySegments.length;
-      
-      // Random phase offset for varied animation
       const phaseOffset = Math.random() * Math.PI * 2;
       
       const glow = this.add.arc(0, 0, 10, 0, 360, false, SPIRIT_GLOW_HEAD, 0.5);
@@ -831,7 +782,6 @@ export class GameScene extends Phaser.Scene {
       this.localBodySegments.push({ glow, core, phaseOffset });
     }
     
-    // Remove excess segments
     while (this.localBodySegments.length > segments.length) {
       const removed = this.localBodySegments.pop();
       if (removed) {
@@ -840,7 +790,6 @@ export class GameScene extends Phaser.Scene {
       }
     }
     
-    // Update positions, sizes, colors, and animations
     for (let i = 0; i < segments.length; i++) {
       const segment = segments[i];
       const visual = this.localBodySegments[i];
@@ -850,28 +799,23 @@ export class GameScene extends Phaser.Scene {
       const radius = this.getSegmentRadius(progress);
       const opacity = this.getSegmentOpacity(progress);
       
-      // Calculate wobble
       const wobble = this.getWobbleOffset(i, visual.phaseOffset, prevSegment, segment);
       
-      // Pulse animation (staggered by index)
       const pulsePhase = this.animTime * PULSE_SPEED + visual.phaseOffset;
       const pulse = 1 + Math.sin(pulsePhase) * PULSE_AMOUNT * (1 - progress * 0.5);
       
-      // Apply position with wobble
       const finalX = segment.x + wobble.x;
       const finalY = segment.y + wobble.y;
       
       visual.glow.setPosition(finalX, finalY);
       visual.core.setPosition(finalX, finalY);
       
-      // Apply size with pulse
       const glowRadius = radius * GLOW_MULTIPLIER * pulse;
       const coreRadius = radius * pulse;
       
       visual.glow.setRadius(glowRadius);
       visual.core.setRadius(coreRadius);
       
-      // Apply gradient colors
       const glowColor = this.lerpColor(SPIRIT_GLOW_HEAD, SPIRIT_GLOW_TAIL, progress);
       const coreColor = this.lerpColor(SPIRIT_CORE_HEAD, SPIRIT_CORE_TAIL, progress);
       
@@ -881,7 +825,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ===========================================================================
-  // OTHER PLAYERS
+  // OTHER PLAYERS (Devil Mask)
   // ===========================================================================
 
   private updateOtherPlayers(): void {
@@ -890,11 +834,9 @@ export class GameScene extends Phaser.Scene {
     );
     
     for (const [id, playerState] of interpolatedPlayers) {
-      // Only render alive players
       if (playerState.alive) {
         this.updateOtherPlayerVisual(id, playerState);
       } else {
-        // Remove dead players
         this.removeOtherPlayer(id);
       }
     }
@@ -913,22 +855,19 @@ export class GameScene extends Phaser.Scene {
       const container = this.add.container(state.x, state.y);
       container.setDepth(90);
       
-      const glow = this.add.arc(
-        0, 0, 
-        GAME_CONFIG.PLAYER.RADIUS * 2.2, 
-        0, 360, false, 
-        GAME_CONFIG.COLORS.OTHER_PLAYER_GLOW, 0.35
-      );
+      // Glow effect for devil mask (red/orange glow)
+      const glow = this.add.image(0, 0, 'devil-mask');
+      glow.setScale(1.3);
+      glow.setTint(0xff6644); // Red-orange glow
+      glow.setAlpha(0.4);
       
-      const core = this.add.arc(
-        0, 0, 
-        GAME_CONFIG.PLAYER.RADIUS, 
-        0, 360, false, 
-        GAME_CONFIG.COLORS.OTHER_PLAYER_CORE, 1
-      );
+      // Main devil mask sprite
+      const core = this.add.image(0, 0, 'devil-mask');
+      core.setScale(0.75);
+      core.setTint(0xffaaaa); // Light red tint
       
-      // Player name tag above their lantern
-      const nameText = this.add.text(0, -35, state.name, {
+      // Player name tag
+      const nameText = this.add.text(0, -40, state.name, {
         fontSize: '12px',
         fontFamily: 'Georgia, serif',
         color: '#ffffff',
@@ -952,7 +891,6 @@ export class GameScene extends Phaser.Scene {
     const { GLOW_MULTIPLIER, PULSE_AMOUNT, PULSE_SPEED } = GAME_CONFIG.BODY;
     const { OTHER_SPIRIT_GLOW_HEAD, OTHER_SPIRIT_GLOW_TAIL, OTHER_SPIRIT_CORE_HEAD, OTHER_SPIRIT_CORE_TAIL } = GAME_CONFIG.COLORS;
     
-    // Add new segments
     while (visual.bodySegments.length < segments.length) {
       const index = visual.bodySegments.length;
       const phaseOffset = Math.random() * Math.PI * 2;
@@ -966,7 +904,6 @@ export class GameScene extends Phaser.Scene {
       visual.bodySegments.push({ glow, core, phaseOffset });
     }
     
-    // Remove excess
     while (visual.bodySegments.length > segments.length) {
       const removed = visual.bodySegments.pop();
       if (removed) {
@@ -975,7 +912,6 @@ export class GameScene extends Phaser.Scene {
       }
     }
     
-    // Update positions
     for (let i = 0; i < segments.length; i++) {
       const segment = segments[i];
       const segVisual = visual.bodySegments[i];
@@ -1023,7 +959,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ===========================================================================
-  // FOOD RENDERING
+  // FOOD RENDERING (Ghosts)
   // ===========================================================================
 
   private updateFood(): void {
@@ -1048,56 +984,39 @@ export class GameScene extends Phaser.Scene {
       container.setDepth(10);
       
       const phaseOffset = Math.random() * Math.PI * 2;
-      const baseRadius = state.radius;
-      const glowRadius = baseRadius * GAME_CONFIG.FOOD.GLOW_MULTIPLIER;
       
-      // Outer glow
-      const glow = this.add.arc(
-        0, 0, 
-        glowRadius, 
-        0, 360, false, 
-        GAME_CONFIG.COLORS.HITODAMA_GLOW, 0.3
-      );
+      // Ghost glow (cyan ethereal glow)
+      const glow = this.add.image(0, 0, 'ghost');
+      glow.setScale(1.4);
+      glow.setTint(0x44ffcc); // Cyan glow
+      glow.setAlpha(0.35);
       
-      // Inner glow for depth
-      const innerGlow = this.add.arc(
-        0, 0, 
-        baseRadius * 1.3, 
-        0, 360, false, 
-        GAME_CONFIG.COLORS.HITODAMA_CORE, GAME_CONFIG.FOOD.INNER_GLOW_OPACITY
-      );
+      // Ghost core
+      const core = this.add.image(0, 0, 'ghost');
+      core.setScale(0.8);
+      glow.setTint(0xccffee); // Light cyan/white
       
-      // Bright core
-      const core = this.add.arc(
-        0, 0, 
-        baseRadius * 0.5, 
-        0, 360, false, 
-        GAME_CONFIG.COLORS.HITODAMA_INNER, 0.9
-      );
+      container.add([glow, core]);
       
-      container.add([glow, innerGlow, core]);
-      
-      visual = { container, glow, innerGlow, core, phaseOffset };
+      visual = { container, glow, core, phaseOffset };
       this.foodVisuals.set(id, visual);
     }
     
     visual.container.setPosition(state.x, state.y);
     
-    // Enhanced pulse animation with multiple frequencies
-    const phase1 = this.animTime * GAME_CONFIG.FOOD.PULSE_SPEED + visual.phaseOffset;
-    const phase2 = this.animTime * GAME_CONFIG.FOOD.PULSE_SPEED * 0.7 + visual.phaseOffset * 1.3;
+    // Floating animation
+    const floatPhase = this.animTime * 2 + visual.phaseOffset;
+    const floatY = Math.sin(floatPhase) * 3;
+    visual.core.setY(floatY);
+    visual.glow.setY(floatY);
     
-    const pulse1 = Math.sin(phase1) * GAME_CONFIG.FOOD.PULSE_AMOUNT;
-    const pulse2 = Math.sin(phase2) * GAME_CONFIG.FOOD.PULSE_AMOUNT * 0.5;
-    const pulse = 1 + pulse1 + pulse2;
+    // Pulse animation
+    const pulse = 1 + Math.sin(this.animTime * GAME_CONFIG.FOOD.PULSE_SPEED + visual.phaseOffset) * 0.15;
+    visual.core.setScale(0.8 * pulse);
+    visual.glow.setScale(1.4 * pulse);
     
-    // Apply pulsing scale
-    visual.glow.setScale(pulse * 1.1);
-    visual.innerGlow.setScale(pulse);
-    visual.core.setScale(pulse * 0.9 + 0.1);
-    
-    // Subtle opacity pulse on glow
-    visual.glow.setAlpha(0.25 + Math.sin(phase1) * 0.1);
+    // Glow opacity pulse
+    visual.glow.setAlpha(0.3 + Math.sin(floatPhase) * 0.1);
   }
 
   private removeFoodVisual(id: string): void {
@@ -1117,13 +1036,11 @@ export class GameScene extends Phaser.Scene {
     
     this.animTime = time / 1000;
     
-    // Always update these
     this.updateOtherPlayers();
     this.updateFood();
     this.updateDeathParticles(delta);
     this.updateScoreboard();
     
-    // Only handle local movement when alive
     if (this.isAlive) {
       this.handleLocalMovement(delta);
       this.sendInputToServer();
@@ -1133,19 +1050,15 @@ export class GameScene extends Phaser.Scene {
   }
 
   private handleLocalMovement(delta: number): void {
-    // Update keyboard state
     this.updateKeyboardInput();
     
-    // Get movement input (keyboard takes priority when active)
     let inputX: number;
     let inputY: number;
     
     if (this.keyboardInput.active) {
-      // Use keyboard input
       inputX = this.keyboardInput.x;
       inputY = this.keyboardInput.y;
     } else {
-      // Use mouse input
       const pointer = this.input.activePointer;
       const camera = this.cameras.main;
       
@@ -1171,15 +1084,17 @@ export class GameScene extends Phaser.Scene {
     
     this.lantern.setPosition(predicted.x, predicted.y);
     
-    // Boost visual feedback with pulse
+    // Boost visual feedback
     const boostPulse = this.isBoosting ? 1 + Math.sin(this.animTime * 8) * 0.1 : 1;
     
     if (this.isBoosting) {
-      this.lanternGlow.setFillStyle(GAME_CONFIG.COLORS.LANTERN_GLOW, 0.55);
-      this.lanternGlow.setRadius(GAME_CONFIG.PLAYER.RADIUS * 2.8 * boostPulse);
+      this.lanternGlow.setScale(1.6 * boostPulse);
+      this.lanternGlow.setAlpha(0.6);
+      this.lanternGlow.setTint(0xffaa44); // Brighter orange when boosting
     } else {
-      this.lanternGlow.setFillStyle(GAME_CONFIG.COLORS.LANTERN_GLOW, 0.35);
-      this.lanternGlow.setRadius(GAME_CONFIG.PLAYER.RADIUS * 2.2);
+      this.lanternGlow.setScale(1.4);
+      this.lanternGlow.setAlpha(0.4);
+      this.lanternGlow.setTint(0xffcc66);
     }
     
     // Visual warning when near world border
@@ -1193,28 +1108,22 @@ export class GameScene extends Phaser.Scene {
     
     if (nearBorder) {
       const warningPulse = 0.5 + Math.sin(this.animTime * 6) * 0.3;
-      this.lanternCore.setFillStyle(
-        this.lerpColor(GAME_CONFIG.COLORS.LANTERN_CORE, 0xff6666, warningPulse),
-        1
-      );
+      this.lanternCore.setTint(this.lerpColor(0xffeedd, 0xff6666, warningPulse));
     } else {
-      this.lanternCore.setFillStyle(GAME_CONFIG.COLORS.LANTERN_CORE, 1);
+      this.lanternCore.setTint(0xffeedd);
     }
   }
 
   private sendInputToServer(): void {
     if (!this.socket.connected || !this.isAlive) return;
     
-    // Get movement input (keyboard takes priority when active)
     let inputX: number;
     let inputY: number;
     
     if (this.keyboardInput.active) {
-      // Use keyboard input
       inputX = this.keyboardInput.x;
       inputY = this.keyboardInput.y;
     } else {
-      // Use mouse input
       const pointer = this.input.activePointer;
       const camera = this.cameras.main;
       
