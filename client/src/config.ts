@@ -24,20 +24,36 @@ export const GAME_CONFIG = {
   
   /** Body segment settings */
   BODY: {
-    SEGMENT_RADIUS: 12,
-    SEGMENT_GLOW_RADIUS: 18,
-    /** Opacity fade from head to tail (1 = full, 0.3 = faded) */
-    TAIL_OPACITY_MIN: 0.4,
+    /** Base segment radius (at head) */
+    SEGMENT_RADIUS_MAX: 14,
+    /** Minimum segment radius (at tail) */
+    SEGMENT_RADIUS_MIN: 6,
+    /** Glow multiplier relative to segment size */
+    GLOW_MULTIPLIER: 1.6,
+    /** Opacity at head (1 = full) */
+    OPACITY_MAX: 0.95,
+    /** Opacity at tail */
+    OPACITY_MIN: 0.3,
+    /** Floating wobble amplitude (pixels) */
+    WOBBLE_AMPLITUDE: 3,
+    /** Wobble speed */
+    WOBBLE_SPEED: 2.5,
+    /** Pulse amplitude for segments */
+    PULSE_AMOUNT: 0.08,
+    /** Pulse speed */
+    PULSE_SPEED: 3,
   },
   
   /** Food (Hitodama) settings */
   FOOD: {
     /** Base glow radius multiplier */
-    GLOW_MULTIPLIER: 1.8,
+    GLOW_MULTIPLIER: 2.0,
     /** Pulse animation speed */
-    PULSE_SPEED: 2,
+    PULSE_SPEED: 2.5,
     /** Pulse intensity */
-    PULSE_AMOUNT: 0.15,
+    PULSE_AMOUNT: 0.2,
+    /** Inner glow opacity */
+    INNER_GLOW_OPACITY: 0.6,
   },
   
   /** Network / Interpolation settings */
@@ -61,20 +77,25 @@ export const GAME_CONFIG = {
   /** Visual settings */
   COLORS: {
     BACKGROUND: 0x0a0a12,
-    // Local player
+    // Local player lantern
     LANTERN_GLOW: 0xffcc66,
     LANTERN_CORE: 0xffeebb,
-    // Body segments (spirits in procession)
-    SPIRIT_GLOW: 0x88ccff,
-    SPIRIT_CORE: 0xaaddff,
+    // Body segments (spirits in procession) - gradient from warm to cool
+    SPIRIT_GLOW_HEAD: 0xaaddff,    // Brighter blue-white near head
+    SPIRIT_GLOW_TAIL: 0x4488cc,    // Deeper blue at tail
+    SPIRIT_CORE_HEAD: 0xddeeff,    // Almost white core near head
+    SPIRIT_CORE_TAIL: 0x88bbdd,    // Faded core at tail
     // Other players
     OTHER_PLAYER_GLOW: 0xff6666,
     OTHER_PLAYER_CORE: 0xffaaaa,
-    OTHER_SPIRIT_GLOW: 0xff8888,
-    OTHER_SPIRIT_CORE: 0xffbbbb,
-    // Food (Hitodama)
-    HITODAMA_GLOW: 0x66ffcc,
-    HITODAMA_CORE: 0xaaffee,
+    OTHER_SPIRIT_GLOW_HEAD: 0xffaaaa,
+    OTHER_SPIRIT_GLOW_TAIL: 0xcc6666,
+    OTHER_SPIRIT_CORE_HEAD: 0xffdddd,
+    OTHER_SPIRIT_CORE_TAIL: 0xdd9999,
+    // Food (Hitodama) - ethereal cyan-green
+    HITODAMA_GLOW: 0x44ffcc,
+    HITODAMA_CORE: 0xccffee,
+    HITODAMA_INNER: 0xffffff,
   },
 } as const;
 

@@ -21,6 +21,8 @@ type GameSocket = Socket<ServerToClientEvents, ClientToServerEvents>;
 interface BodySegmentVisual {
   glow: Phaser.GameObjects.Arc;
   core: Phaser.GameObjects.Arc;
+  /** Unique phase offset for animations */
+  phaseOffset: number;
 }
 
 interface RemotePlayerVisual {
@@ -33,22 +35,16 @@ interface RemotePlayerVisual {
 interface FoodVisual {
   container: Phaser.GameObjects.Container;
   glow: Phaser.GameObjects.Arc;
+  innerGlow: Phaser.GameObjects.Arc;
   core: Phaser.GameObjects.Arc;
+  /** Unique phase offset for animations */
+  phaseOffset: number;
 }
 
 // =============================================================================
 // GAME SCENE
 // =============================================================================
 
-/**
- * Main game scene - handles player movement, rendering, and server communication
- * 
- * Phase 3 features:
- * - Body segments (snake-like procession)
- * - Food (Hitodama) collection
- * - Magnetic pull effect on food
- * - Boost drops body segments as food
- */
 export class GameScene extends Phaser.Scene {
   private socket!: GameSocket;
   private playerId: string | null = null;
@@ -135,9 +131,9 @@ export class GameScene extends Phaser.Scene {
     
     this.lanternGlow = this.add.arc(
       0, 0, 
-      GAME_CONFIG.PLAYER.RADIUS * 2, 
+      GAME_CONFIG.PLAYER.RADIUS * 2.2, 
       0, 360, false, 
-      GAME_CONFIG.COLORS.LANTERN_GLOW, 0.3
+      GAME_CONFIG.COLORS.LANTERN_GLOW, 0.35
     );
     
     this.lanternCore = this.add.arc(
@@ -258,10 +254,89 @@ export class GameScene extends Phaser.Scene {
       const myServerState = snapshot.players[this.playerId];
       if (myServerState) {
         this.clientPrediction.reconcile(myServerState);
-        // Update local body segments from server state
         this.updateLocalBodySegments(myServerState.bodySegments);
       }
     }
+  }
+
+  // ===========================================================================
+  // SEGMENT VISUAL CALCULATIONS
+  // ===========================================================================
+
+  /** Calculate progress along the body (0 = head, 1 = tail) */
+  private getSegmentProgress(index: number, totalSegments: number): number {
+    if (totalSegments <= 1) return 0;
+    return index / (totalSegments - 1);
+  }
+
+  /** Calculate segment radius based on position */
+  private getSegmentRadius(progress: number): number {
+    const { SEGMENT_RADIUS_MAX, SEGMENT_RADIUS_MIN } = GAME_CONFIG.BODY;
+    // Ease out for smoother tail taper
+    const eased = 1 - Math.pow(progress, 0.7);
+    return Phaser.Math.Linear(SEGMENT_RADIUS_MIN, SEGMENT_RADIUS_MAX, eased);
+  }
+
+  /** Calculate segment opacity based on position */
+  private getSegmentOpacity(progress: number): number {
+    const { OPACITY_MAX, OPACITY_MIN } = GAME_CONFIG.BODY;
+    // Ease in for gentle fade
+    const eased = Math.pow(progress, 0.5);
+    return Phaser.Math.Linear(OPACITY_MAX, OPACITY_MIN, eased);
+  }
+
+  /** Interpolate between two colors */
+  private lerpColor(colorA: number, colorB: number, t: number): number {
+    const rA = (colorA >> 16) & 0xff;
+    const gA = (colorA >> 8) & 0xff;
+    const bA = colorA & 0xff;
+    
+    const rB = (colorB >> 16) & 0xff;
+    const gB = (colorB >> 8) & 0xff;
+    const bB = colorB & 0xff;
+    
+    const r = Math.round(Phaser.Math.Linear(rA, rB, t));
+    const g = Math.round(Phaser.Math.Linear(gA, gB, t));
+    const b = Math.round(Phaser.Math.Linear(bA, bB, t));
+    
+    return (r << 16) | (g << 8) | b;
+  }
+
+  /** Calculate floating wobble offset perpendicular to movement */
+  private getWobbleOffset(
+    index: number, 
+    phaseOffset: number, 
+    prevSegment: { x: number; y: number } | null,
+    currentSegment: { x: number; y: number }
+  ): { x: number; y: number } {
+    const { WOBBLE_AMPLITUDE, WOBBLE_SPEED } = GAME_CONFIG.BODY;
+    
+    // Calculate perpendicular direction
+    let perpX = 0;
+    let perpY = 1;
+    
+    if (prevSegment) {
+      const dx = currentSegment.x - prevSegment.x;
+      const dy = currentSegment.y - prevSegment.y;
+      const len = Math.sqrt(dx * dx + dy * dy);
+      if (len > 0.1) {
+        // Perpendicular to movement direction
+        perpX = -dy / len;
+        perpY = dx / len;
+      }
+    }
+    
+    // Sine wave wobble with unique phase per segment
+    const wobblePhase = this.animTime * WOBBLE_SPEED + phaseOffset + index * 0.8;
+    const wobbleAmount = Math.sin(wobblePhase) * WOBBLE_AMPLITUDE;
+    
+    // Reduce wobble for segments closer to head
+    const wobbleFalloff = Math.min(1, index / 3);
+    
+    return {
+      x: perpX * wobbleAmount * wobbleFalloff,
+      y: perpY * wobbleAmount * wobbleFalloff,
+    };
   }
 
   // ===========================================================================
@@ -269,21 +344,23 @@ export class GameScene extends Phaser.Scene {
   // ===========================================================================
 
   private updateLocalBodySegments(segments: BodySegment[]): void {
-    const segmentRadius = GAME_CONFIG.BODY.SEGMENT_RADIUS;
-    const glowRadius = GAME_CONFIG.BODY.SEGMENT_GLOW_RADIUS;
+    const { GLOW_MULTIPLIER, PULSE_AMOUNT, PULSE_SPEED } = GAME_CONFIG.BODY;
+    const { SPIRIT_GLOW_HEAD, SPIRIT_GLOW_TAIL, SPIRIT_CORE_HEAD, SPIRIT_CORE_TAIL } = GAME_CONFIG.COLORS;
     
     // Add new segments if needed
     while (this.localBodySegments.length < segments.length) {
       const index = this.localBodySegments.length;
-      const opacity = this.calculateSegmentOpacity(index, segments.length);
       
-      const glow = this.add.arc(0, 0, glowRadius, 0, 360, false, GAME_CONFIG.COLORS.SPIRIT_GLOW, opacity * 0.4);
-      const core = this.add.arc(0, 0, segmentRadius, 0, 360, false, GAME_CONFIG.COLORS.SPIRIT_CORE, opacity);
+      // Random phase offset for varied animation
+      const phaseOffset = Math.random() * Math.PI * 2;
+      
+      const glow = this.add.arc(0, 0, 10, 0, 360, false, SPIRIT_GLOW_HEAD, 0.5);
+      const core = this.add.arc(0, 0, 5, 0, 360, false, SPIRIT_CORE_HEAD, 1);
       
       glow.setDepth(50 - index);
-      core.setDepth(50 - index);
+      core.setDepth(51 - index);
       
-      this.localBodySegments.push({ glow, core });
+      this.localBodySegments.push({ glow, core, phaseOffset });
     }
     
     // Remove excess segments
@@ -295,23 +372,44 @@ export class GameScene extends Phaser.Scene {
       }
     }
     
-    // Update positions and opacity
+    // Update positions, sizes, colors, and animations
     for (let i = 0; i < segments.length; i++) {
       const segment = segments[i];
       const visual = this.localBodySegments[i];
-      const opacity = this.calculateSegmentOpacity(i, segments.length);
+      const prevSegment = i > 0 ? segments[i - 1] : null;
       
-      visual.glow.setPosition(segment.x, segment.y);
-      visual.core.setPosition(segment.x, segment.y);
-      visual.glow.setAlpha(opacity * 0.4);
-      visual.core.setAlpha(opacity);
+      const progress = this.getSegmentProgress(i, segments.length);
+      const radius = this.getSegmentRadius(progress);
+      const opacity = this.getSegmentOpacity(progress);
+      
+      // Calculate wobble
+      const wobble = this.getWobbleOffset(i, visual.phaseOffset, prevSegment, segment);
+      
+      // Pulse animation (staggered by index)
+      const pulsePhase = this.animTime * PULSE_SPEED + visual.phaseOffset;
+      const pulse = 1 + Math.sin(pulsePhase) * PULSE_AMOUNT * (1 - progress * 0.5);
+      
+      // Apply position with wobble
+      const finalX = segment.x + wobble.x;
+      const finalY = segment.y + wobble.y;
+      
+      visual.glow.setPosition(finalX, finalY);
+      visual.core.setPosition(finalX, finalY);
+      
+      // Apply size with pulse
+      const glowRadius = radius * GLOW_MULTIPLIER * pulse;
+      const coreRadius = radius * pulse;
+      
+      visual.glow.setRadius(glowRadius);
+      visual.core.setRadius(coreRadius);
+      
+      // Apply gradient colors
+      const glowColor = this.lerpColor(SPIRIT_GLOW_HEAD, SPIRIT_GLOW_TAIL, progress);
+      const coreColor = this.lerpColor(SPIRIT_CORE_HEAD, SPIRIT_CORE_TAIL, progress);
+      
+      visual.glow.setFillStyle(glowColor, opacity * 0.5);
+      visual.core.setFillStyle(coreColor, opacity);
     }
-  }
-
-  private calculateSegmentOpacity(index: number, totalSegments: number): number {
-    if (totalSegments <= 1) return 1;
-    const t = index / (totalSegments - 1);
-    return Phaser.Math.Linear(1, GAME_CONFIG.BODY.TAIL_OPACITY_MIN, t);
   }
 
   // ===========================================================================
@@ -343,9 +441,9 @@ export class GameScene extends Phaser.Scene {
       
       const glow = this.add.arc(
         0, 0, 
-        GAME_CONFIG.PLAYER.RADIUS * 2, 
+        GAME_CONFIG.PLAYER.RADIUS * 2.2, 
         0, 360, false, 
-        GAME_CONFIG.COLORS.OTHER_PLAYER_GLOW, 0.3
+        GAME_CONFIG.COLORS.OTHER_PLAYER_GLOW, 0.35
       );
       
       const core = this.add.arc(
@@ -362,27 +460,25 @@ export class GameScene extends Phaser.Scene {
     }
     
     visual.container.setPosition(state.x, state.y);
-    
-    // Update body segments
     this.updateOtherPlayerBodySegments(visual, state.bodySegments);
   }
 
   private updateOtherPlayerBodySegments(visual: RemotePlayerVisual, segments: BodySegment[]): void {
-    const segmentRadius = GAME_CONFIG.BODY.SEGMENT_RADIUS;
-    const glowRadius = GAME_CONFIG.BODY.SEGMENT_GLOW_RADIUS;
+    const { GLOW_MULTIPLIER, PULSE_AMOUNT, PULSE_SPEED } = GAME_CONFIG.BODY;
+    const { OTHER_SPIRIT_GLOW_HEAD, OTHER_SPIRIT_GLOW_TAIL, OTHER_SPIRIT_CORE_HEAD, OTHER_SPIRIT_CORE_TAIL } = GAME_CONFIG.COLORS;
     
     // Add new segments
     while (visual.bodySegments.length < segments.length) {
       const index = visual.bodySegments.length;
-      const opacity = this.calculateSegmentOpacity(index, segments.length);
+      const phaseOffset = Math.random() * Math.PI * 2;
       
-      const glow = this.add.arc(0, 0, glowRadius, 0, 360, false, GAME_CONFIG.COLORS.OTHER_SPIRIT_GLOW, opacity * 0.4);
-      const core = this.add.arc(0, 0, segmentRadius, 0, 360, false, GAME_CONFIG.COLORS.OTHER_SPIRIT_CORE, opacity);
+      const glow = this.add.arc(0, 0, 10, 0, 360, false, OTHER_SPIRIT_GLOW_HEAD, 0.5);
+      const core = this.add.arc(0, 0, 5, 0, 360, false, OTHER_SPIRIT_CORE_HEAD, 1);
       
       glow.setDepth(40 - index);
-      core.setDepth(40 - index);
+      core.setDepth(41 - index);
       
-      visual.bodySegments.push({ glow, core });
+      visual.bodySegments.push({ glow, core, phaseOffset });
     }
     
     // Remove excess
@@ -398,12 +494,34 @@ export class GameScene extends Phaser.Scene {
     for (let i = 0; i < segments.length; i++) {
       const segment = segments[i];
       const segVisual = visual.bodySegments[i];
-      const opacity = this.calculateSegmentOpacity(i, segments.length);
+      const prevSegment = i > 0 ? segments[i - 1] : null;
       
-      segVisual.glow.setPosition(segment.x, segment.y);
-      segVisual.core.setPosition(segment.x, segment.y);
-      segVisual.glow.setAlpha(opacity * 0.4);
-      segVisual.core.setAlpha(opacity);
+      const progress = this.getSegmentProgress(i, segments.length);
+      const radius = this.getSegmentRadius(progress);
+      const opacity = this.getSegmentOpacity(progress);
+      
+      const wobble = this.getWobbleOffset(i, segVisual.phaseOffset, prevSegment, segment);
+      
+      const pulsePhase = this.animTime * PULSE_SPEED + segVisual.phaseOffset;
+      const pulse = 1 + Math.sin(pulsePhase) * PULSE_AMOUNT * (1 - progress * 0.5);
+      
+      const finalX = segment.x + wobble.x;
+      const finalY = segment.y + wobble.y;
+      
+      segVisual.glow.setPosition(finalX, finalY);
+      segVisual.core.setPosition(finalX, finalY);
+      
+      const glowRadius = radius * GLOW_MULTIPLIER * pulse;
+      const coreRadius = radius * pulse;
+      
+      segVisual.glow.setRadius(glowRadius);
+      segVisual.core.setRadius(coreRadius);
+      
+      const glowColor = this.lerpColor(OTHER_SPIRIT_GLOW_HEAD, OTHER_SPIRIT_GLOW_TAIL, progress);
+      const coreColor = this.lerpColor(OTHER_SPIRIT_CORE_HEAD, OTHER_SPIRIT_CORE_TAIL, progress);
+      
+      segVisual.glow.setFillStyle(glowColor, opacity * 0.5);
+      segVisual.core.setFillStyle(coreColor, opacity);
     }
   }
 
@@ -426,12 +544,10 @@ export class GameScene extends Phaser.Scene {
   private updateFood(): void {
     const interpolatedFood = this.snapshotInterpolation.getInterpolatedFood();
     
-    // Update existing and create new food visuals
     for (const [id, foodState] of interpolatedFood) {
       this.updateFoodVisual(id, foodState);
     }
     
-    // Remove food that no longer exists
     for (const id of this.foodVisuals.keys()) {
       if (!interpolatedFood.has(id)) {
         this.removeFoodVisual(id);
@@ -446,34 +562,57 @@ export class GameScene extends Phaser.Scene {
       const container = this.add.container(state.x, state.y);
       container.setDepth(10);
       
-      const glowRadius = state.radius * GAME_CONFIG.FOOD.GLOW_MULTIPLIER;
+      const phaseOffset = Math.random() * Math.PI * 2;
+      const baseRadius = state.radius;
+      const glowRadius = baseRadius * GAME_CONFIG.FOOD.GLOW_MULTIPLIER;
       
+      // Outer glow
       const glow = this.add.arc(
         0, 0, 
         glowRadius, 
         0, 360, false, 
-        GAME_CONFIG.COLORS.HITODAMA_GLOW, 0.4
+        GAME_CONFIG.COLORS.HITODAMA_GLOW, 0.3
       );
       
+      // Inner glow for depth
+      const innerGlow = this.add.arc(
+        0, 0, 
+        baseRadius * 1.3, 
+        0, 360, false, 
+        GAME_CONFIG.COLORS.HITODAMA_CORE, GAME_CONFIG.FOOD.INNER_GLOW_OPACITY
+      );
+      
+      // Bright core
       const core = this.add.arc(
         0, 0, 
-        state.radius, 
+        baseRadius * 0.5, 
         0, 360, false, 
-        GAME_CONFIG.COLORS.HITODAMA_CORE, 0.9
+        GAME_CONFIG.COLORS.HITODAMA_INNER, 0.9
       );
       
-      container.add([glow, core]);
+      container.add([glow, innerGlow, core]);
       
-      visual = { container, glow, core };
+      visual = { container, glow, innerGlow, core, phaseOffset };
       this.foodVisuals.set(id, visual);
     }
     
     visual.container.setPosition(state.x, state.y);
     
-    // Subtle pulse animation
-    const pulse = 1 + Math.sin(this.animTime * GAME_CONFIG.FOOD.PULSE_SPEED + state.x * 0.01) * GAME_CONFIG.FOOD.PULSE_AMOUNT;
-    visual.glow.setScale(pulse);
-    visual.core.setScale(pulse * 0.9);
+    // Enhanced pulse animation with multiple frequencies
+    const phase1 = this.animTime * GAME_CONFIG.FOOD.PULSE_SPEED + visual.phaseOffset;
+    const phase2 = this.animTime * GAME_CONFIG.FOOD.PULSE_SPEED * 0.7 + visual.phaseOffset * 1.3;
+    
+    const pulse1 = Math.sin(phase1) * GAME_CONFIG.FOOD.PULSE_AMOUNT;
+    const pulse2 = Math.sin(phase2) * GAME_CONFIG.FOOD.PULSE_AMOUNT * 0.5;
+    const pulse = 1 + pulse1 + pulse2;
+    
+    // Apply pulsing scale
+    visual.glow.setScale(pulse * 1.1);
+    visual.innerGlow.setScale(pulse);
+    visual.core.setScale(pulse * 0.9 + 0.1);
+    
+    // Subtle opacity pulse on glow
+    visual.glow.setAlpha(0.25 + Math.sin(phase1) * 0.1);
   }
 
   private removeFoodVisual(id: string): void {
@@ -525,13 +664,15 @@ export class GameScene extends Phaser.Scene {
     
     this.lantern.setPosition(predicted.x, predicted.y);
     
-    // Boost visual feedback
+    // Boost visual feedback with pulse
+    const boostPulse = this.isBoosting ? 1 + Math.sin(this.animTime * 8) * 0.1 : 1;
+    
     if (this.isBoosting) {
-      this.lanternGlow.setFillStyle(GAME_CONFIG.COLORS.LANTERN_GLOW, 0.5);
-      this.lanternGlow.setRadius(GAME_CONFIG.PLAYER.RADIUS * 2.5);
+      this.lanternGlow.setFillStyle(GAME_CONFIG.COLORS.LANTERN_GLOW, 0.55);
+      this.lanternGlow.setRadius(GAME_CONFIG.PLAYER.RADIUS * 2.8 * boostPulse);
     } else {
-      this.lanternGlow.setFillStyle(GAME_CONFIG.COLORS.LANTERN_GLOW, 0.3);
-      this.lanternGlow.setRadius(GAME_CONFIG.PLAYER.RADIUS * 2);
+      this.lanternGlow.setFillStyle(GAME_CONFIG.COLORS.LANTERN_GLOW, 0.35);
+      this.lanternGlow.setRadius(GAME_CONFIG.PLAYER.RADIUS * 2.2);
     }
   }
 

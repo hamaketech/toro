@@ -114,8 +114,10 @@ export interface ClientToServerEvents {
 // =============================================================================
 
 export const GAME_CONSTANTS = {
+  /** Gap between head and first body segment (larger for visual separation) */
+  FIRST_SEGMENT_GAP: 35,
   /** Spacing between body segments in pixels */
-  BODY_SEGMENT_SPACING: 25,
+  BODY_SEGMENT_SPACING: 22,
   /** Number of position history points to keep per segment spacing */
   POSITION_HISTORY_RESOLUTION: 2,
   /** Food magnetic pull radius */

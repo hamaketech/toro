@@ -204,10 +204,13 @@ function updatePositionHistory(player: ServerPlayerState): void {
   });
   
   // Calculate how many history points we need
+  const firstGap = GAME_CONSTANTS.FIRST_SEGMENT_GAP;
   const segmentSpacing = GAME_CONSTANTS.BODY_SEGMENT_SPACING;
   const historyResolution = GAME_CONSTANTS.POSITION_HISTORY_RESOLUTION;
   const maxSegments = Math.max(player.targetLength, player.bodySegments.length) + 5;
-  const maxHistoryLength = maxSegments * segmentSpacing * historyResolution;
+  // Account for larger first segment gap
+  const totalDistance = firstGap + (maxSegments - 1) * segmentSpacing;
+  const maxHistoryLength = totalDistance * historyResolution;
   
   // Trim old history
   while (player.positionHistory.length > maxHistoryLength) {
@@ -217,6 +220,7 @@ function updatePositionHistory(player: ServerPlayerState): void {
 
 function calculateBodySegments(player: ServerPlayerState): BodySegment[] {
   const segments: BodySegment[] = [];
+  const firstGap = GAME_CONSTANTS.FIRST_SEGMENT_GAP;
   const segmentSpacing = GAME_CONSTANTS.BODY_SEGMENT_SPACING;
   const history = player.positionHistory;
   
@@ -244,10 +248,13 @@ function calculateBodySegments(player: ServerPlayerState): BodySegment[] {
     
     distanceAccumulated += segmentDistance;
     
-    // Place a segment every BODY_SEGMENT_SPACING pixels
-    while (distanceAccumulated >= segmentSpacing && segmentIndex < currentLength) {
+    // First segment has larger gap from head, rest use normal spacing
+    const requiredSpacing = segmentIndex === 0 ? firstGap : segmentSpacing;
+    
+    // Place a segment when we've accumulated enough distance
+    while (distanceAccumulated >= requiredSpacing && segmentIndex < currentLength) {
       // Interpolate position along this segment
-      const overshoot = distanceAccumulated - segmentSpacing;
+      const overshoot = distanceAccumulated - requiredSpacing;
       const t = segmentDistance > 0 ? overshoot / segmentDistance : 0;
       
       segments.push({
@@ -255,7 +262,7 @@ function calculateBodySegments(player: ServerPlayerState): BodySegment[] {
         y: curr.y + dy * t,
       });
       
-      distanceAccumulated -= segmentSpacing;
+      distanceAccumulated -= requiredSpacing;
       segmentIndex++;
     }
   }
