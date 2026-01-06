@@ -22,6 +22,7 @@ COPY client/vite.config.ts ./client/
 COPY shared/ ./shared/
 COPY client/ ./client/
 COPY server/ ./server/
+COPY scripts/ ./scripts/
 
 # Build client (Vite) and server (esbuild)
 RUN npm run build
