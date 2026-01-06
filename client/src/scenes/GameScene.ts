@@ -210,7 +210,7 @@ export class GameScene extends Phaser.Scene {
         this,
         GameScene.MAX_VISIBLE_FOOD,
         textureKey,
-        frameKey ?? 'ghost'
+        frameKey  // Only pass frame when using atlas
       );
       
       console.log(`🔄 Object pools initialized (food pool capacity: ${GameScene.MAX_VISIBLE_FOOD})`);

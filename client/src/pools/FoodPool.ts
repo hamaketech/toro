@@ -53,16 +53,17 @@ export class FoodPool {
   constructor(
     scene: Phaser.Scene, 
     maxFood: number = 200,
-    textureKey: string = 'toro',
-    frameKey: string = 'ghost'
+    textureKey: string = 'ghost',
+    frameKey?: string  // Optional - only used with atlas
   ) {
     this.scene = scene;
     this.maxVisible = maxFood;
     this.textureKey = textureKey;
-    this.frameKey = frameKey;
+    this.frameKey = frameKey ?? '';
     
     // Initialize pools
     // Each food needs 2 images (glow + core), so pool size = maxFood * 2
+    // Pass undefined frame when not using atlas (individual textures)
     this.glowPool = new ImagePool(scene, textureKey, frameKey, maxFood);
     this.corePool = new ImagePool(scene, textureKey, frameKey, maxFood);
     
