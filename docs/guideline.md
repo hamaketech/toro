@@ -1,131 +1,299 @@
-# PROJECT: Tōrō (The River of Souls) - Development Guidelines
+# Tōrō - The River of Souls
 
-## 1. Project Context & Vision
-* **Genre:** Multiplayer .io Survival / Action
-* **Theme:** "Obon Festival" (Japanese Folklore). Relaxing visual atmosphere mixed with high-tension survival.
-* **Core Loop:** Collect souls (growth) -> Lengthen your procession -> Cut off enemies to destroy them -> Absorb their collection.
-* **Visual Style:** 2D, Top-down. Dark background (River/Abyss), Glowing lights, Soft bloom effects, Floating motion.
+> A multiplayer .io survival game inspired by Japanese folklore
 
-## 2. Tech Stack (Strict Enforcement)
-* **Language:** TypeScript (Strict typing enabled).
-* **Client Engine:** Phaser 3 (Arcade Physics).
-* **Server:** Node.js + Socket.io (Geckos.io is an alternative if UDP is needed later, stick to TCP/Socket.io for MVP).
-* **Bundler:** Vite.
-* **State Management:** Snapshot Interpolation (Server sends state @ 20-30hz, Client interpolates for smoothness).
+**Live:** https://toro-b5mm.onrender.com
 
-## 3. Game Design Specifications (The "Rules of Reality")
+---
 
-### A. The Player (The Lantern)
-* **Head:** The "Lantern" is the hitbox for death.
-* **Body:** The "Procession" (Spirits) follows the head.
-* **Movement Physics:** * NOT grid-based.
-    * Floaty/Boat-like inertia.
-    * Rotation speed is limited (cannot turn 180 instantly).
-    * Mouse distance determines speed (Slow drift vs Fast movement).
+## Game Overview
 
-### B. Mechanics
-1.  **Collection:** * Small pellets ("Hitodama") increase score + length.
-    * Pellets have a slight magnetic pull toward the Lantern.
-2.  **Combat (The Kill):**
-    * IF [My Lantern] touches [Enemy Procession] -> I die.
-    * IF [My Lantern] touches [World Border] -> I die.
-    * Head-to-Head collision -> Both die (or smaller one dies, depending on balance testing).
-3.  **Death Consequence:**
-    * Player entity is removed.
-    * All collected souls in the "Body" are dropped as high-value pellets at the location of death.
-4.  **Boost (Sprint):**
-    * Holding `Space` or `Left Click` increases speed by 50%.
-    * **Cost:** While boosting, the player drops mass (shrinks) rapidly, leaving a trail of pellets behind.
-5.  **Fog of War:**
-    * The player can only see a radius around their Lantern.
-    * The radius *shrinks* slightly as the player gets massive (Simulating "Tunnel Vision" or "Corrupted Sight").
+### Theme & Aesthetic
+- **Setting:** The River of Souls during Obon Festival
+- **Visual Style:** Dark ethereal atmosphere with glowing spirits
+- **Mood:** Relaxing visuals with high-tension survival gameplay
 
-### C. Classes (Variables)
-* **Paper Guide (Default):** Balanced stats.
-* **Kitsune (Speed):** +20% Base Speed, -30% Turn Radius.
-* **Stone Toro (Tank):** -20% Speed, Collision cooldown (1 hit shield).
+### Core Gameplay Loop
+1. **Collect** floating souls (Hitodama/ghosts) to grow your procession
+2. **Navigate** the river, avoiding other players' bodies
+3. **Hunt** other players by cutting them off with your body
+4. **Survive** - if your lantern touches another player's body, you die
+5. **Dominate** - absorb the souls dropped by defeated players
 
-## 4. Coding Standards & Conventions
-* **Architecture:** Use a Component-based structure or Phaser's Scene management.
-* **Variables:** `camelCase` for variables/functions, `PascalCase` for Classes/Components.
-* **Multiplayer Logic:** * *Server Authority:* The server calculates positions and collisions.
-    * *Client Prediction:* Client moves instantly visually, then corrects if server disagrees.
-* **Assets:** Use placeholder colored circles/squares for now. Do not wait for art assets to code logic.
+---
 
-## 5. Implementation Phases (Roadmap)
-*Use these phases to prompt Cursor. Do not skip ahead.*
+## How It Works
 
-**Phase 1: The Skeleton**
-* Setup Vite + Phaser + Socket.io boilerplate.
-* Get a "Circle" moving on the screen with mouse input (Client side).
-* Connect Client to Server (Basic Handshake).
+### Player (The Lantern)
 
-**Phase 2: Multiplayer Movement**
-* Send input to Server -> Server updates position -> Broadcast to all Clients.
-* Implement "Snapshot Interpolation" so movement looks smooth, not laggy.
+| Component | Description |
+|-----------|-------------|
+| **Head (Lantern)** | Your hitbox - if it touches an enemy body, you die |
+| **Body (Procession)** | Trail of spirits following your lantern |
+| **Size** | Grows with each soul collected, lantern scales up slightly |
 
-**Phase 3: The Snake Logic (The Hard Part)**
-* Implement the "Body" array.
-* Logic for body segments to follow the head (History trail buffering).
-* Spawn "Food" on the server and sync to clients.
-* Eating food = Grow body.
+### Movement
 
-**Phase 4: Combat & Collision**
-* Server-side collision detection (Head vs Body).
-* Death state handling (Explosion of food).
-* Scoreboard.
+- **Desktop:** Mouse position determines direction, distance from player controls speed
+- **Mobile:** Touch position determines direction and speed
+- **Physics:** Smooth, floaty movement with momentum (boat-like inertia)
+- **Turn Rate:** Limited - you cannot instantly reverse direction
 
-**Phase 5: Juice & Polish**
-* Name selection screen before joining
-* Add Glow/Bloom shaders.
+### Controls
 
-**Phase 6: Infrastructure & Deployment** ✅
-*Focus: Preparing the application for optimized single-instance deployment.*
-*See: `docs/RFC-006-phase6-infrastructure.md` for full details.*
+| Platform | Move | Boost |
+|----------|------|-------|
+| Desktop | Mouse position | Hold Space or Left Click |
+| Mobile | Touch & drag | Dedicated boost button (bottom-right) |
 
-**1. Containerization (Docker)** ✅
-* `Dockerfile` - Multi-stage build with node:20-alpine
-* `.dockerignore` - Excludes node_modules, .git, docs
-* `docker-compose.yml` - Local testing
-* Build uses `esbuild` for fast TypeScript bundling
+### Boost Mechanic
+- **Speed:** +50% movement speed while active
+- **Cost:** Drops souls behind you (shrinks your body)
+- **Use:** Escaping danger, chasing prey, strategic positioning
 
-**2. Network Logic Update (Sticky Session Bypass)** ✅
-* Client: `transports: ['websocket']` in socket connection
-* Server: Configurable CORS via `CORS_ORIGIN` env var
-* Client auto-detects production URL (same origin)
+### Food System
 
-**3. Server Performance Optimizations** ✅
-* Spatial grid system for O(n) collision detection
-* Squared distance calculations (avoid sqrt)
-* Optimized Set-based death tracking
-* Single-instance mode for 100-500 player capacity
+| Type | Color | Value | Spawn |
+|------|-------|-------|-------|
+| Normal Ghost | Cyan/Teal | 1 soul | Natural spawn |
+| Golden Ghost | Orange/Gold | 3-4 souls | Death drops (~30%) |
 
-**4. Client Performance Optimizations** ✅
-* Body segment LOD: Max 150 visual segments (handles 1000+ souls)
-* Food viewport culling: Only render visible food
-* Food animation distance: Static beyond 600px from player
-* Golden food priority: Always rendered with animations
+- Food has **magnetic pull** toward nearby players (larger players = stronger pull)
+- Golden food is **larger**, **brighter**, and always **animated**
 
-**5. Room System** ✅
-* Auto-creates rooms when player limits reached
-* Room codes for playing with friends (?room=CODE)
-* Isolated game state per room
-* Auto-cleanup of empty rooms
+### Death & Drops
 
-**6. Environment Variables**
+When you die:
+1. Your lantern disappears
+2. All body segments drop as food at death location
+3. ~70% drop as normal ghosts (1 soul)
+4. ~30% drop as golden ghosts (3-4 souls)
+5. You respawn with a new name/session
+
+### Collision Rules
+
+| Scenario | Result |
+|----------|--------|
+| Your head → Enemy body | **You die** |
+| Your head → World border | **You die** |
+| Head vs Head (same size) | **Both die** |
+| Head vs Head (different) | **Smaller dies** |
+
+---
+
+## Technical Architecture
+
+### Stack
+
+| Layer | Technology |
+|-------|------------|
+| Client | Phaser 3 + TypeScript + Vite |
+| Server | Node.js + Express + Socket.io |
+| Transport | WebSocket (no long-polling) |
+| Build | esbuild (server), Vite (client) |
+| Deploy | Docker → Render |
+
+### Network Model
+
+```
+┌─────────────┐     Input (20hz)      ┌─────────────┐
+│   Client    │ ───────────────────→  │   Server    │
+│  (Phaser)   │                       │  (Node.js)  │
+│             │  ←───────────────────  │             │
+└─────────────┘    Game State (20hz)  └─────────────┘
+```
+
+- **Server Authoritative:** Server calculates all positions and collisions
+- **Snapshot Interpolation:** Client smoothly interpolates between server states
+- **No Client Prediction:** Avoids jitter/desync issues on mobile
+
+### Room System
+
+```
+┌──────────────────────────────────────────────┐
+│              Room Manager                     │
+│  • Auto-creates rooms when full              │
+│  • Supports room codes for friends           │
+│  • Cleans up empty rooms                     │
+└──────────────────────────────────────────────┘
+         │
+    ┌────┴────┬────────────┐
+    ▼         ▼            ▼
+┌────────┐ ┌────────┐ ┌────────┐
+│FIRE-42 │ │MOON-17 │ │STAR-99 │
+│ 8/10   │ │ 5/10   │ │ 2/10   │
+└────────┘ └────────┘ └────────┘
+```
+
+- Max 10 players per room (configurable)
+- Each room has isolated game state
+- Share room via URL: `?room=FIRE-42`
+
+### Performance Optimizations
+
+#### Server
+| Optimization | Impact |
+|--------------|--------|
+| Spatial Grid | O(n) collision instead of O(n²) |
+| Squared Distance | Avoids expensive sqrt() |
+| Set-based Death | O(1) lookup for dead players |
+
+#### Client
+| Optimization | Impact |
+|--------------|--------|
+| Body LOD | Max 150 visual segments (handles 1000+ souls) |
+| Food Culling | Only renders food in viewport |
+| Animation Distance | Static food beyond 600px |
+| Golden Priority | Always animates valuable food |
+
+---
+
+## Project Structure
+
+```
+toro/
+├── client/
+│   ├── src/
+│   │   ├── scenes/
+│   │   │   ├── MainMenuScene.ts    # Name entry, room code
+│   │   │   └── GameScene.ts        # Main game rendering
+│   │   ├── network/
+│   │   │   ├── SnapshotInterpolation.ts
+│   │   │   └── ClientPrediction.ts
+│   │   ├── config.ts               # Game constants
+│   │   └── main.ts                 # Entry point
+│   └── public/
+│       └── assets/                 # SVG sprites
+├── server/
+│   └── src/
+│       └── index.ts                # Game server + room logic
+├── shared/
+│   └── types.ts                    # Shared TypeScript types
+├── docs/
+│   └── RFC-*.md                    # Technical documentation
+├── Dockerfile
+├── docker-compose.yml
+└── package.json
+```
+
+---
+
+## Configuration
+
+### Environment Variables
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PORT` | 3001/3000 | Server port |
-| `NODE_ENV` | development | Environment |
+| `PORT` | 3001 (dev) / 3000 (prod) | Server port |
+| `NODE_ENV` | development | Environment mode |
 | `CORS_ORIGIN` | * | Allowed origins |
 | `MAX_PLAYERS_PER_ROOM` | 10 | Players per room |
 
-**7. Deployment Commands**
+### Game Constants (server/client)
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| World Size | 6000 x 6000 | Play area dimensions |
+| Tick Rate | 20 Hz | Server update frequency |
+| Food Count | ~150 | Target food on map |
+| Base Speed | 200 | Player movement speed |
+| Boost Multiplier | 1.5x | Speed while boosting |
+| Magnet Radius | 150-300 | Food attraction range |
+
+---
+
+## Development
+
+### Commands
+
 ```bash
-npm run dev          # Development
-npm run build        # Build for production
-npm start            # Run production server
-npm run docker:up    # Docker
+# Development (hot reload)
+npm run dev
+
+# Production build
+npm run build
+npm start
+
+# Docker
+npm run docker:up      # Build & run
+npm run docker:down    # Stop
 ```
 
-**Production URL:** https://toro-b5mm.onrender.com
+### Local URLs
+
+| Service | URL |
+|---------|-----|
+| Client (dev) | http://localhost:5173 |
+| Server (dev) | http://localhost:3001 |
+| Docker | http://localhost:3000 |
+
+---
+
+## Deployment (Render)
+
+### Setup
+
+1. Create **Web Service** → Connect GitHub repo
+2. Runtime: **Docker**
+3. Region: **Oregon** (or closest)
+
+### Environment Variables
+
+```
+PORT=3000
+NODE_ENV=production
+CORS_ORIGIN=https://your-app.onrender.com
+MAX_PLAYERS_PER_ROOM=10
+```
+
+### Health Check
+
+```bash
+curl https://toro-b5mm.onrender.com/api/status
+```
+
+Returns:
+```json
+{
+  "status": "ok",
+  "totalPlayers": 5,
+  "totalRooms": 1,
+  "tick": 12345,
+  "uptime": 3600
+}
+```
+
+---
+
+## Visual Assets
+
+| Asset | File | Description |
+|-------|------|-------------|
+| Lantern | `lantern.svg` | Local player head |
+| Devil Mask | `devil-mask.svg` | Other player heads |
+| Ghost | `ghost.svg` | Food (Hitodama) |
+
+All assets use **SVG** for crisp scaling. Colors are applied via Phaser tints.
+
+---
+
+## Implementation Status
+
+| Phase | Status | Description |
+|-------|--------|-------------|
+| 1. Foundation | ✅ | Phaser + Socket.io setup |
+| 2. Multiplayer | ✅ | Server-authoritative movement |
+| 3. Snake Logic | ✅ | Body segments, food collection |
+| 4. Combat | ✅ | Collisions, death, scoreboard |
+| 5. Polish | ✅ | Menu, glow effects, mobile |
+| 6. Infrastructure | ✅ | Docker, Render, performance |
+
+---
+
+## Future Ideas (Not Implemented)
+
+- [ ] Player classes (Speed, Tank, Balanced)
+- [ ] Fog of war (vision radius)
+- [ ] Leaderboard persistence
+- [ ] Spectator mode
+- [ ] Power-ups / abilities
