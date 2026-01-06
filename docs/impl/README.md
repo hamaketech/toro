@@ -141,3 +141,4 @@ Each guide includes a testing checklist. If something doesn't work:
 *These guides were synthesized from 5 AI optimization proposals.*
 *See `RFC-008-optimization-synthesis.md` for the full analysis.*
 
+

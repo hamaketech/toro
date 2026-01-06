@@ -324,3 +324,4 @@ The atlas should include: ghost, lantern, devil-mask frames at minimum.
 Maintain all existing visual effects (tinting, scaling, alpha).
 ```
 
+

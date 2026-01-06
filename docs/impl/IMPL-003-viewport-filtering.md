@@ -421,3 +421,4 @@ Goal: Reduce bandwidth by 70% while maintaining smooth gameplay.
 Filter should prioritize nearby entities and high-value targets.
 ```
 
+
