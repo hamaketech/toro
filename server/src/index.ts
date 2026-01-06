@@ -405,6 +405,7 @@ if (NODE_ENV === 'production') {
   // Serve static assets
   app.use(express.static(clientDistPath));
   app.use('/images', express.static(join(clientPublicPath, 'images')));
+  app.use('/atlas', express.static(join(clientPublicPath, 'atlas')));
   
   // SPA fallback - serve index.html for all non-API routes
   app.get('*', (req, res, next) => {
