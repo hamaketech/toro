@@ -287,6 +287,32 @@ All assets use **SVG** for crisp scaling. Colors are applied via Phaser tints.
 | 4. Combat | ✅ | Collisions, death, scoreboard |
 | 5. Polish | ✅ | Menu, glow effects, mobile |
 | 6. Infrastructure | ✅ | Docker, Render, performance |
+| 7. Optimization | 🚧 | Binary protocol, prediction, pooling |
+
+---
+
+## Phase 7: Professional Optimization
+
+*See: `docs/RFC-007-phase7-optimization.md` for full details.*
+
+**Goal:** Achieve slither.io-level performance (50+ players, 60fps mobile, <20ms input latency)
+
+| Optimization | Impact | Status |
+|--------------|--------|--------|
+| Object Pooling | Eliminates GC stuttering | ⬜ Pending |
+| Texture Atlas | 2x mobile FPS | ⬜ Pending |
+| Client Prediction | Instant input response | ⬜ Pending |
+| Viewport Filtering | 4x player capacity | ⬜ Pending |
+| Binary Protocol | 80% bandwidth reduction | ⬜ Pending |
+
+### Target Metrics
+
+| Metric | Current | Target |
+|--------|---------|--------|
+| Mobile FPS | 30-45 | 60 stable |
+| Input latency | 100ms | <20ms perceived |
+| Players/room | 10-20 | 50+ |
+| Bandwidth | 50 KB/s | <15 KB/s |
 
 ---
 

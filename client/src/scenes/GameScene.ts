@@ -3,6 +3,7 @@ import { io, Socket } from 'socket.io-client';
 import { GAME_CONFIG } from '../config';
 import { SnapshotInterpolation, InterpolatedPlayer, InterpolatedFood } from '../network/SnapshotInterpolation';
 import { ClientPrediction } from '../network/ClientPrediction';
+import { FoodPool } from '../pools/FoodPool';
 import type { 
   ServerToClientEvents, 
   ClientToServerEvents, 
@@ -87,8 +88,15 @@ export class GameScene extends Phaser.Scene {
   // Other players
   private otherPlayers: Map<string, RemotePlayerVisual> = new Map();
   
-  // Food visuals
+  // Food visuals - Legacy Map (kept for fallback)
   private foodVisuals: Map<string, FoodVisual> = new Map();
+  
+  // ==========================================================================
+  // OBJECT POOLING SYSTEM - Performance optimization to eliminate GC stuttering
+  // ==========================================================================
+  private foodPool?: FoodPool;
+  private usePooling = true; // Toggle for A/B testing or debugging
+  private useAtlas = false;  // Will be true if texture atlas loads successfully
   
   // Input state
   private isBoosting = false;
@@ -147,7 +155,23 @@ export class GameScene extends Phaser.Scene {
   }
 
   preload(): void {
-    // Load SVG images from public folder
+    // Try loading texture atlas first (better batching, fewer draw calls)
+    this.load.on('filecomplete-atlas-toro', () => {
+      console.log('✅ Texture atlas loaded - using optimized batching');
+      this.useAtlas = true;
+    });
+    
+    this.load.on('loaderror', (file: Phaser.Loader.File) => {
+      if (file.key === 'toro') {
+        console.log('📦 Atlas not found - using individual SVGs');
+        this.useAtlas = false;
+      }
+    });
+    
+    // Try to load atlas (will fall back to SVGs if not found)
+    this.load.atlas('toro', '/atlas/toro.png', '/atlas/toro.json');
+    
+    // Always load individual SVGs as fallback
     this.load.svg('lantern', '/images/lantern.svg', { width: 64, height: 64 });
     this.load.svg('devil-mask', '/images/devil-mask.svg', { width: 64, height: 64 });
     this.load.svg('ghost', '/images/ghost.svg', { width: 32, height: 32 });
@@ -155,6 +179,9 @@ export class GameScene extends Phaser.Scene {
 
   create(): void {
     this.snapshotInterpolation = new SnapshotInterpolation();
+    
+    // Initialize object pools for performance
+    this.initializePools();
     
     this.setupWorld();
     this.createPlayer();
@@ -165,6 +192,29 @@ export class GameScene extends Phaser.Scene {
     this.connectToServer();
     this.setupDebug();
     this.setupBloom();
+    
+    console.log(`🎮 GameScene initialized (pooling: ${this.usePooling}, atlas: ${this.useAtlas})`);
+  }
+  
+  /**
+   * Initialize object pools for performance optimization
+   */
+  private initializePools(): void {
+    if (this.usePooling) {
+      // Initialize food pool
+      // Use atlas frame key if available, otherwise use individual texture
+      const textureKey = this.useAtlas ? 'toro' : 'ghost';
+      const frameKey = this.useAtlas ? 'ghost' : undefined;
+      
+      this.foodPool = new FoodPool(
+        this,
+        GameScene.MAX_VISIBLE_FOOD,
+        textureKey,
+        frameKey ?? 'ghost'
+      );
+      
+      console.log(`🔄 Object pools initialized (food pool capacity: ${GameScene.MAX_VISIBLE_FOOD})`);
+    }
   }
   
   /**
@@ -1375,7 +1425,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   // ===========================================================================
-  // FOOD RENDERING (Ghosts) - Optimized with viewport culling
+  // FOOD RENDERING (Ghosts) - Optimized with viewport culling & object pooling
   // ===========================================================================
 
   // Food rendering limits
@@ -1397,6 +1447,61 @@ export class GameScene extends Phaser.Scene {
     const playerX = this.lantern?.x ?? camera.scrollX + camera.width / 2;
     const playerY = this.lantern?.y ?? camera.scrollY + camera.height / 2;
     
+    // Use pooled rendering if enabled
+    if (this.usePooling && this.foodPool) {
+      this.updateFoodPooled(
+        interpolatedFood,
+        playerX,
+        playerY,
+        { left: viewLeft, right: viewRight, top: viewTop, bottom: viewBottom }
+      );
+      return;
+    }
+    
+    // Legacy rendering (non-pooled)
+    this.updateFoodLegacy(interpolatedFood, playerX, playerY, viewLeft, viewRight, viewTop, viewBottom);
+  }
+  
+  /**
+   * Pooled food rendering - uses FoodPool for zero GC
+   */
+  private updateFoodPooled(
+    interpolatedFood: Map<string, InterpolatedFood>,
+    playerX: number,
+    playerY: number,
+    viewportBounds: { left: number; right: number; top: number; bottom: number }
+  ): void {
+    if (!this.foodPool) return;
+    
+    // Convert to the format expected by FoodPool
+    const foodMap = new Map<string, { x: number; y: number; value: number }>();
+    for (const [id, food] of interpolatedFood) {
+      foodMap.set(id, { x: food.x, y: food.y, value: food.value });
+    }
+    
+    // Let the pool handle sync, culling, and rendering
+    this.foodPool.syncWithServer(
+      foodMap,
+      this.animTime,
+      playerX,
+      playerY,
+      viewportBounds,
+      GameScene.FOOD_ANIMATION_DISTANCE
+    );
+  }
+  
+  /**
+   * Legacy food rendering - creates/destroys objects (causes GC)
+   */
+  private updateFoodLegacy(
+    interpolatedFood: Map<string, InterpolatedFood>,
+    playerX: number,
+    playerY: number,
+    viewLeft: number,
+    viewRight: number,
+    viewTop: number,
+    viewBottom: number
+  ): void {
     let visibleCount = 0;
     const visibleIds = new Set<string>();
     
@@ -1684,8 +1789,11 @@ export class GameScene extends Phaser.Scene {
     const latestState = this.snapshotInterpolation.getLatestPlayerState(this.playerId || '');
     const inputMode = this.keyboardInput.active ? 'Keyboard' : 'Mouse';
     
+    // Pool stats for debugging
+    const poolStats = this.foodPool ? this.foodPool.getStats() : { active: 0, pooled: 0, total: 0 };
+    
     this.debugText.setText([
-      `Phase 5: Juice & Polish`,
+      `Phase 7: Optimized`,
       `Player: ${this.playerName}`,
       `RTT: ${rtt}ms`,
       `Position: (${pos.x.toFixed(0)}, ${pos.y.toFixed(0)})`,
@@ -1695,6 +1803,10 @@ export class GameScene extends Phaser.Scene {
       `Score: ${latestState?.score ?? 0}`,
       `Kills: ${latestState?.kills ?? 0}`,
       `Other Players: ${this.otherPlayers.size}`,
+      `--- Pool Stats ---`,
+      `Food: ${poolStats.active} active / ${poolStats.total} total`,
+      `Pooling: ${this.usePooling ? 'ON' : 'OFF'}`,
+      `Atlas: ${this.useAtlas ? 'YES' : 'NO'}`,
       `[F3 debug] [ESC menu]`,
     ].join('\n'));
   }
@@ -1703,6 +1815,13 @@ export class GameScene extends Phaser.Scene {
     if (this.timeSyncInterval) {
       clearInterval(this.timeSyncInterval);
     }
+    
+    // Clean up pools
+    if (this.foodPool) {
+      this.foodPool.destroy();
+      this.foodPool = undefined;
+    }
+    
     this.socket?.disconnect();
   }
 }
