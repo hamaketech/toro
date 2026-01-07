@@ -55,13 +55,14 @@ Each guide contains:
 - `IMPL-006-smooth-camera.md` - Camera with lookahead
 - `IMPL-007-adaptive-quality.md` - Auto quality scaling
 - `IMPL-010-audio-system.md` - Sound effects and music
+- `IMPL-011-bot-system.md` - AI bots with steering behaviors
 
 ### 📝 To Be Created
 - `IMPL-008-delta-compression.md`
 - `IMPL-009-binary-protocol.md`
-- `IMPL-011-kill-feed.md`
-- `IMPL-012-reconnection.md`
-- `IMPL-013-anti-cheat.md`
+- `IMPL-012-kill-feed.md`
+- `IMPL-013-reconnection.md`
+- `IMPL-014-anti-cheat.md`
 
 ---
 
@@ -106,6 +107,7 @@ Adaptive Quality → Object Pooling (controls limits)
 Delta Compression → Viewport Filtering
 Binary Protocol → Delta Compression (optional)
 Audio System → none
+Bot System → none (server-side only)
 ```
 
 **Recommended order:** Follow the Week 1 → Week 2 → Week 3-4 order above.
