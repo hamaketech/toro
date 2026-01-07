@@ -155,20 +155,7 @@ export class GameScene extends Phaser.Scene {
   }
 
   preload(): void {
-    // Try loading texture atlas first (better batching, fewer draw calls)
-    this.load.on('filecomplete-atlas-toro', () => {
-      console.log('✅ Texture atlas loaded - using optimized batching');
-      this.useAtlas = true;
-    });
-    
-    this.load.on('loaderror', (file: Phaser.Loader.File) => {
-      if (file.key === 'toro') {
-        console.log('📦 Atlas not found - using individual SVGs');
-        this.useAtlas = false;
-      }
-    });
-    
-    // Try to load atlas (will fall back to SVGs if not found)
+    // Try to load texture atlas (better batching, fewer draw calls)
     this.load.atlas('toro', '/atlas/toro.png', '/atlas/toro.json');
     
     // Always load individual SVGs as fallback
@@ -179,6 +166,21 @@ export class GameScene extends Phaser.Scene {
 
   create(): void {
     this.snapshotInterpolation = new SnapshotInterpolation();
+    
+    // Check if atlas loaded successfully by verifying texture exists with frames
+    if (this.textures.exists('toro')) {
+      const atlasTexture = this.textures.get('toro');
+      const frameNames = atlasTexture.getFrameNames();
+      if (frameNames.length > 1) { // More than just __BASE frame
+        this.useAtlas = true;
+        console.log('✅ Texture atlas loaded - using optimized batching');
+        console.log(`   Atlas frames: ${frameNames.filter(f => f !== '__BASE').join(', ')}`);
+      } else {
+        console.log('📦 Atlas loaded but no frames found - using individual SVGs');
+      }
+    } else {
+      console.log('📦 Atlas not found - using individual SVGs');
+    }
     
     // Initialize object pools for performance
     this.initializePools();
