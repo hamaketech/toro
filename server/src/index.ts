@@ -18,6 +18,8 @@ import type {
   JoinOptions,
 } from '../../shared/types';
 import { GAME_CONSTANTS } from '../../shared/types';
+import { BotManager, BotState } from './BotManager';
+import type { AIPlayerView } from './BotAI';
 
 // =============================================================================
 // SERVER CONFIGURATION
@@ -34,6 +36,12 @@ const TICK_RATE = 20; // 20 updates per second (50ms interval)
 // Room configuration
 const MAX_PLAYERS_PER_ROOM = parseInt(process.env.MAX_PLAYERS_PER_ROOM || '15', 10);
 const MIN_ROOMS = 1; // Always keep at least 1 room
+
+// Bot configuration
+const BOTS_ENABLED = process.env.BOTS_ENABLED !== 'false'; // Enabled by default
+const MIN_BOTS_PER_ROOM = parseInt(process.env.MIN_BOTS_PER_ROOM || '2', 10);
+const MAX_BOTS_PER_ROOM = parseInt(process.env.MAX_BOTS_PER_ROOM || '6', 10);
+const TARGET_PLAYERS_PER_ROOM = parseInt(process.env.TARGET_PLAYERS || '5', 10);
 
 const WORLD_WIDTH = 6000;
 const WORLD_HEIGHT = 6000;
@@ -421,6 +429,19 @@ if (NODE_ENV === 'production') {
 
 // Initialize room manager
 roomManager = new RoomManager(io);
+
+// Initialize bot manager
+let botManager: BotManager | null = null;
+if (BOTS_ENABLED) {
+  botManager = new BotManager(WORLD_WIDTH, WORLD_HEIGHT, {
+    minBotsPerRoom: MIN_BOTS_PER_ROOM,
+    maxBotsPerRoom: MAX_BOTS_PER_ROOM,
+    targetPlayersPerRoom: TARGET_PLAYERS_PER_ROOM,
+    autoRespawn: true,
+    respawnDelay: 3000,
+  });
+  console.log('🤖 Bot system enabled');
+}
 
 // Health check / status endpoint
 app.get('/api/status', (_req, res) => {
@@ -877,17 +898,29 @@ function checkRespawnsInRoom(room: GameRoom): void {
 // SCOREBOARD (Room-aware)
 // =============================================================================
 
-function buildScoreboardForRoom(room: GameRoom): ScoreboardEntry[] {
+function buildScoreboardForRoom(room: GameRoom, bots: BotState[] = []): ScoreboardEntry[] {
   const entries: ScoreboardEntry[] = [];
   
+  // Add human players
   for (const player of room.players.values()) {
-    if (!player.hasJoined) continue; // Only show players who have joined
+    if (!player.hasJoined) continue;
     entries.push({
       id: player.id,
       name: player.name,
       score: player.score,
       kills: player.kills,
       bodyLength: player.bodySegments.length,
+    });
+  }
+  
+  // Add bots
+  for (const bot of bots) {
+    entries.push({
+      id: bot.id,
+      name: bot.name,
+      score: bot.score,
+      kills: bot.kills,
+      bodyLength: bot.bodySegments.length,
     });
   }
   
@@ -1087,11 +1120,22 @@ io.on('connection', (socket: GameSocket) => {
   const playerState = createPlayer(playerId, socket, room.id);
   room.addPlayer(playerState);
   
+  // Balance bots for this room
+  if (botManager) {
+    const { added } = botManager.balanceRoomBots(room.id, room.playerCount);
+    if (added.length > 0) {
+      console.log(`  🤖 Spawned ${added.length} bots for room ${room.id}`);
+    }
+  }
+  
   console.log(`  → Assigned to ${room.id} (${room.playerCount}/${MAX_PLAYERS_PER_ROOM} players)`);
+  
+  // Get bots for initial snapshot
+  const roomBots = botManager ? botManager.getBotsForRoom(room.id) : [];
   
   const initialState: InitialGameState = {
     playerId,
-    snapshot: buildGameSnapshotForRoom(room),
+    snapshot: buildGameSnapshotForRoom(room, roomBots),
     serverTime: Date.now(),
     roomCode: room.id,
   };
@@ -1156,11 +1200,57 @@ function gameLoop(): void {
   for (const room of roomManager.getAllRooms()) {
     room.incrementTick();
     
-    // Rebuild spatial grids for fast collision lookups
+    // Get bots for this room
+    const roomBots = botManager ? botManager.getBotsForRoom(room.id) : [];
+    
+    // Balance bot count based on human players
+    if (botManager && room.getTick() % 100 === 0) { // Check every 5 seconds
+      const humanCount = room.playerCount;
+      botManager.balanceRoomBots(room.id, humanCount);
+    }
+    
+    // Rebuild spatial grids for fast collision lookups (include bots)
     room.rebuildGrids();
+    for (const bot of roomBots) {
+      if (bot.alive) {
+        room.playerGrid.insert(bot as unknown as ServerPlayerState);
+      }
+    }
     
     // Check for respawns in this room
     checkRespawnsInRoom(room);
+    
+    // Check bot respawns
+    if (botManager) {
+      const respawnedBots = botManager.checkRespawns();
+      for (const bot of respawnedBots) {
+        if (bot.id.includes(room.id)) {
+          io.to(room.socketRoom).emit('playerRespawned', bot.id);
+        }
+      }
+    }
+    
+    // Update bot AI
+    if (botManager && roomBots.length > 0) {
+      // Build player view map for AI
+      const playerViews = new Map<string, AIPlayerView>();
+      for (const player of room.players.values()) {
+        if (player.alive && player.hasJoined) {
+          playerViews.set(player.id, {
+            id: player.id,
+            x: player.x,
+            y: player.y,
+            angle: player.angle,
+            speed: player.speed,
+            bodyLength: player.bodySegments.length,
+            bodySegments: player.bodySegments,
+            alive: player.alive,
+          });
+        }
+      }
+      
+      botManager.updateBotAI(room.id, playerViews, room.food, deltaMs);
+    }
     
     // Update all alive players in this room
     for (const player of room.players.values()) {
@@ -1172,16 +1262,29 @@ function gameLoop(): void {
       }
     }
     
+    // Update all alive bots in this room
+    for (const bot of roomBots) {
+      if (bot.alive) {
+        updateBotMovement(bot, deltaS);
+        updateBotPositionHistory(bot);
+        bot.bodySegments = calculateBotBodySegments(bot);
+        handleBotBoostDrop(room, bot, deltaS);
+      }
+    }
+    
     // Check collisions using spatial grid (faster)
     checkPlayerCollisionsInRoom(room);
+    checkBotCollisionsInRoom(room, roomBots);
     
     // Update food using spatial grid
     updateFoodMagnetismInRoom(room, deltaS);
+    updateBotFoodMagnetism(room, roomBots, deltaS);
     checkFoodCollisionsInRoom(room);
+    checkBotFoodCollisions(room, roomBots);
     maintainFoodCountInRoom(room);
     
     // Broadcast game state to this room only
-    const snapshot = buildGameSnapshotForRoom(room);
+    const snapshot = buildGameSnapshotForRoom(room, roomBots);
     io.to(room.socketRoom).emit('gameState', snapshot);
   }
   
@@ -1240,11 +1343,11 @@ function updatePlayerMovement(player: ServerPlayerState, deltaS: number): void {
   player.speed = player.currentSpeed;
 }
 
-function buildGameSnapshotForRoom(room: GameRoom): GameSnapshot {
+function buildGameSnapshotForRoom(room: GameRoom, bots: BotState[] = []): GameSnapshot {
   const playersRecord: Record<string, PlayerState> = {};
   
+  // Add human players
   for (const [id, player] of room.players) {
-    // Only include players who have officially joined
     if (!player.hasJoined) continue;
     
     playersRecord[id] = {
@@ -1263,12 +1366,30 @@ function buildGameSnapshotForRoom(room: GameRoom): GameSnapshot {
     };
   }
   
+  // Add bots (appear as regular players to clients)
+  for (const bot of bots) {
+    playersRecord[bot.id] = {
+      id: bot.id,
+      name: bot.name,
+      x: bot.x,
+      y: bot.y,
+      angle: bot.angle,
+      speed: bot.speed,
+      score: bot.score,
+      bodySegments: bot.bodySegments,
+      targetLength: bot.targetLength,
+      lastProcessedInput: bot.lastProcessedInput,
+      alive: bot.alive,
+      kills: bot.kills,
+    };
+  }
+  
   return {
     players: playersRecord,
     food: {
       items: Array.from(room.food.values()),
     },
-    scoreboard: buildScoreboardForRoom(room),
+    scoreboard: buildScoreboardForRoom(room, bots),
     serverTime: Date.now(),
     tick: room.getTick(),
   };
@@ -1289,6 +1410,425 @@ function clamp(value: number, min: number, max: number): number {
 }
 
 // =============================================================================
+// BOT SYSTEM FUNCTIONS
+// =============================================================================
+
+function updateBotMovement(bot: BotState, deltaS: number): void {
+  if (!bot.alive) return;
+  
+  const { input } = bot;
+  
+  const distance = Math.sqrt(input.mouseX * input.mouseX + input.mouseY * input.mouseY);
+  
+  if (distance > 0.05) {
+    bot.targetAngle = Math.atan2(input.mouseY, input.mouseX);
+    
+    const angleDiff = wrapAngle(bot.targetAngle - bot.currentAngle);
+    const turnAmount = PLAYER_CONFIG.TURN_SPEED * deltaS;
+    
+    if (Math.abs(angleDiff) < turnAmount) {
+      bot.currentAngle = bot.targetAngle;
+    } else if (angleDiff > 0) {
+      bot.currentAngle += turnAmount;
+    } else {
+      bot.currentAngle -= turnAmount;
+    }
+    
+    bot.currentAngle = wrapAngle(bot.currentAngle);
+    
+    const speedFactor = Math.min(distance, 1);
+    const baseSpeed = PLAYER_CONFIG.BASE_SPEED * speedFactor;
+    
+    const canBoost = input.boosting && bot.targetLength > GAME_CONSTANTS.MIN_BODY_LENGTH;
+    bot.currentSpeed = canBoost 
+      ? baseSpeed * PLAYER_CONFIG.BOOST_MULTIPLIER 
+      : baseSpeed;
+  } else {
+    bot.currentSpeed *= 0.95;
+  }
+  
+  const velocityX = Math.cos(bot.currentAngle) * bot.currentSpeed;
+  const velocityY = Math.sin(bot.currentAngle) * bot.currentSpeed;
+  
+  bot.x += velocityX * deltaS;
+  bot.y += velocityY * deltaS;
+  
+  const hardLimit = PLAYER_CONFIG.RADIUS * -0.5;
+  bot.x = clamp(bot.x, hardLimit, WORLD_WIDTH - hardLimit);
+  bot.y = clamp(bot.y, hardLimit, WORLD_HEIGHT - hardLimit);
+  
+  bot.angle = bot.currentAngle;
+  bot.speed = bot.currentSpeed;
+}
+
+function updateBotPositionHistory(bot: BotState): void {
+  if (!bot.alive) return;
+  
+  const now = Date.now();
+  
+  bot.positionHistory.unshift({
+    x: bot.x,
+    y: bot.y,
+    timestamp: now,
+  });
+  
+  const firstGap = GAME_CONSTANTS.FIRST_SEGMENT_GAP;
+  const segmentSpacing = GAME_CONSTANTS.BODY_SEGMENT_SPACING;
+  const historyResolution = GAME_CONSTANTS.POSITION_HISTORY_RESOLUTION;
+  const maxSegments = Math.max(bot.targetLength, bot.bodySegments.length) + 5;
+  const totalDistance = firstGap + (maxSegments - 1) * segmentSpacing;
+  const maxHistoryLength = totalDistance * historyResolution;
+  
+  while (bot.positionHistory.length > maxHistoryLength) {
+    bot.positionHistory.pop();
+  }
+}
+
+function calculateBotBodySegments(bot: BotState): BodySegment[] {
+  if (!bot.alive) return [];
+  
+  const segments: BodySegment[] = [];
+  const firstGap = GAME_CONSTANTS.FIRST_SEGMENT_GAP;
+  const segmentSpacing = GAME_CONSTANTS.BODY_SEGMENT_SPACING;
+  const history = bot.positionHistory;
+  
+  if (history.length < 2) {
+    return segments;
+  }
+  
+  const currentLength = Math.min(
+    bot.bodySegments.length + 1,
+    bot.targetLength
+  );
+  
+  let distanceAccumulated = 0;
+  let segmentIndex = 0;
+  
+  for (let i = 1; i < history.length && segmentIndex < currentLength; i++) {
+    const prev = history[i - 1];
+    const curr = history[i];
+    
+    const dx = prev.x - curr.x;
+    const dy = prev.y - curr.y;
+    const segmentDistance = Math.sqrt(dx * dx + dy * dy);
+    
+    distanceAccumulated += segmentDistance;
+    
+    const requiredSpacing = segmentIndex === 0 ? firstGap : segmentSpacing;
+    
+    while (distanceAccumulated >= requiredSpacing && segmentIndex < currentLength) {
+      const overshoot = distanceAccumulated - requiredSpacing;
+      const t = segmentDistance > 0 ? overshoot / segmentDistance : 0;
+      
+      segments.push({
+        x: curr.x + dx * t,
+        y: curr.y + dy * t,
+      });
+      
+      distanceAccumulated -= requiredSpacing;
+      segmentIndex++;
+    }
+  }
+  
+  return segments;
+}
+
+function handleBotBoostDrop(room: GameRoom, bot: BotState, deltaS: number): void {
+  if (!bot.alive) return;
+  if (!bot.input.boosting || bot.targetLength <= GAME_CONSTANTS.MIN_BODY_LENGTH) {
+    return;
+  }
+  
+  bot.boostDropAccumulator += GAME_CONSTANTS.BOOST_DROP_RATE * deltaS;
+  
+  while (bot.boostDropAccumulator >= 1 && bot.targetLength > GAME_CONSTANTS.MIN_BODY_LENGTH) {
+    bot.boostDropAccumulator -= 1;
+    bot.targetLength--;
+    
+    const tailSegment = bot.bodySegments[bot.bodySegments.length - 1];
+    if (tailSegment) {
+      spawnFoodInRoom(room,
+        tailSegment.x + (Math.random() - 0.5) * 10,
+        tailSegment.y + (Math.random() - 0.5) * 10,
+        GAME_CONSTANTS.DROPPED_PELLET_VALUE
+      );
+    }
+  }
+}
+
+function checkBotCollisionsInRoom(room: GameRoom, bots: BotState[]): void {
+  const playersArray = Array.from(room.players.values()).filter(p => p.alive);
+  const aliveBots = bots.filter(b => b.alive);
+  const deaths: Array<{ entity: ServerPlayerState | BotState; isBot: boolean; cause: DeathCause; killer?: ServerPlayerState | BotState; killerIsBot?: boolean }> = [];
+  const deadIds = new Set<string>();
+  
+  // Check bot vs player collisions
+  for (const bot of aliveBots) {
+    if (deadIds.has(bot.id)) continue;
+    
+    // Check world border
+    if (isBotAtWorldBorder(bot)) {
+      deaths.push({ entity: bot, isBot: true, cause: 'world_border' });
+      deadIds.add(bot.id);
+      continue;
+    }
+    
+    // Check vs players
+    for (const player of playersArray) {
+      if (deadIds.has(bot.id)) break;
+      
+      // Head vs Head
+      const dx = bot.x - player.x;
+      const dy = bot.y - player.y;
+      const headDistSq = dx * dx + dy * dy;
+      const headCollisionDist = PLAYER_CONFIG.RADIUS * 2;
+      
+      if (headDistSq < headCollisionDist * headCollisionDist) {
+        const botSize = bot.bodySegments.length;
+        const playerSize = player.bodySegments.length;
+        
+        if (GAME_CONSTANTS.HEAD_COLLISION_BOTH_DIE) {
+          deaths.push({ entity: bot, isBot: true, cause: 'head_to_head', killer: player, killerIsBot: false });
+          deaths.push({ entity: player, isBot: false, cause: 'head_to_head', killer: bot, killerIsBot: true });
+          deadIds.add(bot.id);
+          deadIds.add(player.id);
+        } else {
+          if (botSize <= playerSize) {
+            deaths.push({ entity: bot, isBot: true, cause: 'head_to_head', killer: player, killerIsBot: false });
+            deadIds.add(bot.id);
+          }
+          if (playerSize <= botSize && !deadIds.has(player.id)) {
+            deaths.push({ entity: player, isBot: false, cause: 'head_to_head', killer: bot, killerIsBot: true });
+            deadIds.add(player.id);
+          }
+        }
+        continue;
+      }
+      
+      // Bot head vs player body
+      const bodyHitboxSq = (PLAYER_CONFIG.RADIUS + GAME_CONSTANTS.BODY_SEGMENT_HITBOX) ** 2;
+      for (const segment of player.bodySegments) {
+        const segDx = bot.x - segment.x;
+        const segDy = bot.y - segment.y;
+        const segDistSq = segDx * segDx + segDy * segDy;
+        
+        if (segDistSq < bodyHitboxSq) {
+          deaths.push({ entity: bot, isBot: true, cause: 'head_collision', killer: player, killerIsBot: false });
+          deadIds.add(bot.id);
+          break;
+        }
+      }
+      
+      // Player head vs bot body
+      if (!deadIds.has(player.id)) {
+        for (const segment of bot.bodySegments) {
+          const segDx = player.x - segment.x;
+          const segDy = player.y - segment.y;
+          const segDistSq = segDx * segDx + segDy * segDy;
+          
+          if (segDistSq < bodyHitboxSq) {
+            deaths.push({ entity: player, isBot: false, cause: 'head_collision', killer: bot, killerIsBot: true });
+            deadIds.add(player.id);
+            break;
+          }
+        }
+      }
+    }
+    
+    // Check vs other bots
+    for (const otherBot of aliveBots) {
+      if (bot.id === otherBot.id) continue;
+      if (deadIds.has(bot.id)) break;
+      if (deadIds.has(otherBot.id)) continue;
+      
+      // Head vs Head
+      const dx = bot.x - otherBot.x;
+      const dy = bot.y - otherBot.y;
+      const headDistSq = dx * dx + dy * dy;
+      const headCollisionDist = PLAYER_CONFIG.RADIUS * 2;
+      
+      if (headDistSq < headCollisionDist * headCollisionDist) {
+        const botSize = bot.bodySegments.length;
+        const otherSize = otherBot.bodySegments.length;
+        
+        if (botSize <= otherSize) {
+          deaths.push({ entity: bot, isBot: true, cause: 'head_to_head', killer: otherBot, killerIsBot: true });
+          deadIds.add(bot.id);
+        }
+        if (otherSize <= botSize && !deadIds.has(otherBot.id)) {
+          deaths.push({ entity: otherBot, isBot: true, cause: 'head_to_head', killer: bot, killerIsBot: true });
+          deadIds.add(otherBot.id);
+        }
+        continue;
+      }
+      
+      // Bot head vs other bot body
+      const bodyHitboxSq = (PLAYER_CONFIG.RADIUS + GAME_CONSTANTS.BODY_SEGMENT_HITBOX) ** 2;
+      for (const segment of otherBot.bodySegments) {
+        const segDx = bot.x - segment.x;
+        const segDy = bot.y - segment.y;
+        const segDistSq = segDx * segDx + segDy * segDy;
+        
+        if (segDistSq < bodyHitboxSq) {
+          deaths.push({ entity: bot, isBot: true, cause: 'head_collision', killer: otherBot, killerIsBot: true });
+          deadIds.add(bot.id);
+          break;
+        }
+      }
+    }
+  }
+  
+  // Process deaths
+  for (const { entity, isBot, cause, killer, killerIsBot } of deaths) {
+    if (isBot) {
+      killBotInRoom(room, entity as BotState, cause, killer, killerIsBot);
+    } else {
+      killPlayerInRoom(room, entity as ServerPlayerState, cause, killer as ServerPlayerState | undefined);
+    }
+  }
+}
+
+function isBotAtWorldBorder(bot: BotState): boolean {
+  const margin = PLAYER_CONFIG.RADIUS * 0.5;
+  return (
+    bot.x <= margin ||
+    bot.x >= WORLD_WIDTH - margin ||
+    bot.y <= margin ||
+    bot.y >= WORLD_HEIGHT - margin
+  );
+}
+
+function killBotInRoom(
+  room: GameRoom,
+  bot: BotState,
+  cause: DeathCause,
+  killer?: ServerPlayerState | BotState,
+  _killerIsBot?: boolean
+): void {
+  if (!bot.alive || !botManager) return;
+  
+  console.log(`[${room.id}] Bot ${bot.name} died: ${cause}${killer ? ` (killed by ${killer.name})` : ''}`);
+  
+  // Award kill to killer
+  if (killer && killer.id !== bot.id) {
+    killer.kills++;
+  }
+  
+  // Drop food from body segments
+  const GOLDEN_CHANCE = 0.3;
+  const GOLDEN_VALUE_MIN = 3;
+  const GOLDEN_VALUE_MAX = 4;
+  const NORMAL_VALUE = 1;
+  
+  let foodDropped = 0;
+  for (const segment of bot.bodySegments) {
+    const isGolden = Math.random() < GOLDEN_CHANCE;
+    const value = isGolden 
+      ? GOLDEN_VALUE_MIN + Math.floor(Math.random() * (GOLDEN_VALUE_MAX - GOLDEN_VALUE_MIN + 1))
+      : NORMAL_VALUE;
+    
+    spawnFoodInRoom(room,
+      segment.x + (Math.random() - 0.5) * 30,
+      segment.y + (Math.random() - 0.5) * 30,
+      value
+    );
+    foodDropped++;
+  }
+  
+  // Drop food at head
+  const headDrops = Math.min(5, Math.floor(bot.score / 10) + 1);
+  for (let i = 0; i < headDrops; i++) {
+    const angle = (i / headDrops) * Math.PI * 2;
+    const dist = 20 + Math.random() * 30;
+    const isGolden = Math.random() < 0.5;
+    const value = isGolden ? GOLDEN_VALUE_MAX : NORMAL_VALUE;
+    
+    spawnFoodInRoom(room,
+      bot.x + Math.cos(angle) * dist,
+      bot.y + Math.sin(angle) * dist,
+      value
+    );
+    foodDropped++;
+  }
+  
+  // Use bot manager to kill
+  botManager.killBot(bot);
+  
+  // Emit death event
+  const deathEvent: DeathEvent = {
+    playerId: bot.id,
+    cause,
+    killerId: killer?.id,
+    killerName: killer?.name,
+    x: bot.x,
+    y: bot.y,
+    score: bot.score,
+    foodDropped,
+  };
+  
+  io.to(room.socketRoom).emit('playerDied', deathEvent);
+}
+
+function updateBotFoodMagnetism(room: GameRoom, bots: BotState[], deltaS: number): void {
+  for (const bot of bots) {
+    if (!bot.alive) continue;
+    
+    const bodyCount = bot.bodySegments.length;
+    const sizePullMultiplier = 1 + Math.min(bodyCount * 0.075, 1.5);
+    const magnetRadius = GAME_CONSTANTS.FOOD_MAGNET_RADIUS * (1 + Math.min(bodyCount * 0.02, 0.4));
+    
+    const nearbyFood = room.foodGrid.getNearby(bot.x, bot.y, magnetRadius);
+    
+    for (const item of nearbyFood) {
+      const dx = bot.x - item.x;
+      const dy = bot.y - item.y;
+      const distSq = dx * dx + dy * dy;
+      
+      if (distSq < magnetRadius * magnetRadius && distSq > 0) {
+        const distance = Math.sqrt(distSq);
+        const pullFactor = 1 - (distance / magnetRadius);
+        const pullStrength = GAME_CONSTANTS.FOOD_MAGNET_STRENGTH * pullFactor * pullFactor * sizePullMultiplier;
+        
+        const normalizedDx = dx / distance;
+        const normalizedDy = dy / distance;
+        
+        item.x += normalizedDx * pullStrength * deltaS;
+        item.y += normalizedDy * pullStrength * deltaS;
+      }
+    }
+  }
+}
+
+function checkBotFoodCollisions(room: GameRoom, bots: BotState[]): void {
+  const collectionRadius = PLAYER_CONFIG.RADIUS + GAME_CONSTANTS.FOOD_RADIUS;
+  const collectionRadiusSq = collectionRadius * collectionRadius;
+  
+  for (const bot of bots) {
+    if (!bot.alive) continue;
+    
+    const foodToRemove: string[] = [];
+    const nearbyFood = room.foodGrid.getNearby(bot.x, bot.y, collectionRadius);
+    
+    for (const item of nearbyFood) {
+      const dx = bot.x - item.x;
+      const dy = bot.y - item.y;
+      const distSq = dx * dx + dy * dy;
+      
+      if (distSq < collectionRadiusSq) {
+        bot.score += item.value;
+        bot.targetLength += item.value * GAME_CONSTANTS.GROWTH_PER_FOOD;
+        foodToRemove.push(item.id);
+        io.to(room.socketRoom).emit('foodCollected', item.id, bot.id);
+      }
+    }
+    
+    for (const id of foodToRemove) {
+      room.food.delete(id);
+    }
+  }
+}
+
+// =============================================================================
 // STARTUP
 // =============================================================================
 
@@ -1298,6 +1838,7 @@ setInterval(gameLoop, 1000 / TICK_RATE);
 httpServer.listen(PORT, '0.0.0.0', () => {
   const portStr = PORT.toString().padEnd(4, ' ');
   const maxPlayers = MAX_PLAYERS_PER_ROOM.toString().padEnd(3, ' ');
+  const botStatus = BOTS_ENABLED ? `${MIN_BOTS_PER_ROOM}-${MAX_BOTS_PER_ROOM} per room` : 'Disabled';
   console.log(`
 ╔═══════════════════════════════════════════════╗
 ║     🏮 Tōrō Server - River of Souls 🏮        ║
@@ -1306,6 +1847,7 @@ httpServer.listen(PORT, '0.0.0.0', () => {
 ║  Environment: ${NODE_ENV.padEnd(11, ' ')}                   ║
 ║  Tick rate: ${TICK_RATE} Hz                           ║
 ║  Max players/room: ${maxPlayers}                      ║
+║  🤖 Bots: ${botStatus.padEnd(20, ' ')}          ║
 ║  Mode: Single Instance (Optimized)            ║
 ╚═══════════════════════════════════════════════╝
   `);
